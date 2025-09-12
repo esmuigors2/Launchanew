@@ -231,6 +231,7 @@ def main():
     
     try:
         opts, restargs = getopt.getopt(sys.argv[1:], "hi:xsbn:j:v", ["help", "steps", "scpcm", "beststeps", "strictness=", "normalize-to=", "job=", "verbose"])
+
     except getopt.GetoptError:        # no "as" clause in python 2.2
         # print help information and exit:
         if buzzing : print("Some option was not recognized.")  # will print something like "option -a not recognized"
@@ -259,8 +260,7 @@ def main():
         else:
             if buzzing : assert False, "The option " + o + " could not be recognized."
     try:
-        import argparse
-        import natsort
+        from natsort import natsorted
         restargs = natsorted(restargs)
     except ImportError:
         print("Oh well, we cannot sort the files!")
@@ -769,7 +769,7 @@ def main():
         #print("Atnemts tiek "+str(allthebest))
 
         bestofthebest = bestaltogether - allthebest + 1 + allthebest1
-        print('\n\nRecommended step is '+ str(bestaltogether+1) + ' (or '+str(bestofthebest)+' within job # '+str(bestjobbb)) + ' )'
+        print('\n\nRecommended step is '+ str(bestaltogether+1) + ' (or '+str(bestofthebest)+' within job # '+str(bestjobbb) + ' )')
     print("ATTENTION! The files came in the following order:")
     for i in restargs:
         print(i)
