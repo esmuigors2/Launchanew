@@ -1,0 +1,15 @@
+#!/bin/bash
+echo "Sorce output file is $1."
+echo "Copying last geometry to the 3rd part of QST3 input for subsequent Berny job..."
+tsgeom=$(findmingeomauto $1)
+echo "Geometry is saved to temp. file $tsgeom."
+kuzya="${1%U*}U"
+moos=${1#$kuzya}; moos=${moos%%_*}; moos=${moos%%.*}
+kuzya="$kuzya$((moos+1)).gjf"
+echo "Next job part is recognized to be $kuzya."
+sed '/==GETTSQST==/,$d' $kuzya > zobenzoss
+cat $tsgeom >> zobenzoss
+sed '1,/==GETTSQST==/d' $kuzya >> zobenzoss
+rm $kuzya; mv zobenzoss $kuzya
+echo "Replaced QST3 third geometry placeholder with the geometry."
+

@@ -1,0 +1,21 @@
+#!/bin/bash
+helpp=false
+
+while getopts ":h" myopts; do
+    case $myopts in
+	h) helpp=true ;;
+    esac
+done
+shift "$((OPTIND-1))"
+($helpp) && echo "Usage: $0 [-h] input_file lindaWorker1 lindaWorker2 lindaWorker3 ...
+	-h : display this help." && exit 0
+inputfile=$1; shift
+lindastring="%LindaWorkers="
+for un in "$@"; do 
+    lindastring="$lindastring"$un","
+done
+lindastring="${lindastring%,}"
+islinda=$(grep -m 1 -i '%LindaWorkers' $inputfile)
+[ -n "$islinda" ] && sed -i '/%LindaWorkers/d' $inputfile
+sed -i '/NProcShared/I a '"$lindastring" $inputfile
+

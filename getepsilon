@@ -1,0 +1,89 @@
+#!/bin/bash
+# getepsilon version 0.4
+# Changes: adapted to the new version of launchanew (with generalized iterative utilities)
+# argument 1: threshold for epsilon
+# argument 2: epsilon (static) used in prev. iteration (e.g. 78 for water)
+# argument 3: epsilon (dynamic, or ∞) used in prev. iteration (e.g. 1.78 for water)
+# argument 4: current step of the iterative calculation
+# argument 5: name of .OUT file with alphas to use in the current iteration
+# argument 6: name of .GJF file in which eps and epsinf will be updated for the subsequent calculation
+
+#echo $@
+echo "(==(==(==(==(==(==(==(== Getepsilon iterating utility v. 0.4"
+mainame=$5
+echo "   Prev iteration file is $mainame"
+giter=$4 #(head -1 $mainame.getepsilon | sed 's/.* //')
+threshhy=$1; lasteps=$2; lastepsinf=$3
+#lastjnr=$(cat $mainame.gjf | grep -n "Diagonal vibrational polar"); ((vibrapolarnr++))
+newname=$6
+echo "   New iteration file is $newname"
+polarstring=$(cat $mainame | grep  "Exact polarizability" | tail -1 | sed 's/.*://')
+#echo "Polarstring is $polarstring"
+read -r -a polarray <<< " $polarstring"
+#for shutterfly in $(seq 0 $((${#polarray[@]}-1))); do echo ${polarray[$shutterfly]}; done
+# that fine bash does not have floating point arithmetics D:
+polar=$(python -c 'print ('${polarray[0]}'+'${polarray[2]}'+'${polarray[5]}')/3' )
+echo "   Electronic polarizability is $polar a.u. (it. $giter)"
+volums=$(tac $mainame | grep -m 1 "Molar volume =" | sed 's/.*= //; s/ bohr.*//')
+#echo "Volume (end) is $volums"
+volums2=$(tac $mainame | sed -n '1,/Entering Link 1/p' | tac | grep -m 1 "Molar volume =" | sed 's/.*= //; s/ bohr.*//')
+#echo "Volume (start) was $volums2"
+meinvolum="python -c 'print "$volums"*0.148184711'"
+meinvolum2="python -c 'print "$volums2"*0.148184711'"
+#echo $meinvolum
+volums=$(eval $meinvolum)
+volums2=$(eval $meinvolum2)
+echo "   Molecular volume is $volums bohr^3(it. $giter)"
+echo "   Initially molecular volume was $volums2 bohr^3(it. $giter)"
+#echo $(cat $mainame | grep -n "Diagonal vibrational polar" | sed 's/:.*//')
+vibrapolarnr=$(cat $mainame | grep -n "Diagonal vibrational polar" | sed 's/:.*//'); ((vibrapolarnr++))
+read -r -a vibrapolarray <<< "$(cat $mainame | sed -n $vibrapolarnr'p')"
+#for shutterfly in $(seq 0 $((${#vibrapolarray[@]}-1))); do echo ${vibrapolarray[$shutterfly]}; done
+meinvolum="python -c 'print ("${vibrapolarray[0]}"+"${vibrapolarray[1]}"+"${vibrapolarray[2]}")/3'"
+vibrapolar=$(eval $meinvolum)
+echo "   Vibrational polarizability is $vibrapolar a.u. (it. $giter)"
+meinvolum="python -c 'print "$polar"+"$vibrapolar"'"
+vibrapolar=$(eval $meinvolum)
+#echo "Total polarizability is $vibrapolar a.u. (it. $giter)"
+# Conversion and Clausius-Mossoti is done simultaneously
+
+meinvolum="python -c 'print "$polar"*4*3.141592654*0.148184712/"$volums"/3'"
+cpolarsi=$(eval $meinvolum)
+#echo "C for epsinf is $cpolarsi (it. $giter)"
+meinvolum="python -c 'print (2*"$cpolarsi"+1)/(1-"$cpolarsi")'"
+epsinf=$(eval $meinvolum)
+epsinf=$(printf "%5.4f\n" $epsinf)
+echo "   Previous iteration produced epsinf = $epsinf"
+
+meinvolum="python -c 'print "$vibrapolar"*4*3.141592654*0.148184712/"$volums"/3'"
+cpolarsi=$(eval $meinvolum)
+#echo "C for eps is $cpolarsi (it. $giter)"
+meinvolum="python -c 'print(2*"$cpolarsi"+1)/(1-"$cpolarsi")'"
+eps=$(eval $meinvolum)
+[ $(python -c "if "$epsinf" > "$eps": print('true')") ] && { export eps=$epsinf; echo "Warning: too large polarizability, eps was not obtained. Defaulting to eps = epsinf."; }
+eps=$(printf "%5.4f\n" $eps)
+echo "   Previous iteration produced eps = $eps"
+
+#echo "newname is $newname"
+[ $(python -c "if "$lasteps" > "$eps": print('true')") ] && deltaeps=$(python -c 'print '$lasteps'-'$eps) || deltaeps=$(python -c 'print '$eps'-'$lasteps)
+echo "   Last change in eps is $deltaeps"
+[ $(python -c "if "$lastepsinf" > "$epsinf": print 'true'") ] && deltaepsinf=$(python -c 'print '$lastepsinf'-'$epsinf) || deltaepsinf=$(python -c 'print '$epsinf'-'$lastepsinf)
+maxdeltaeps=$deltaepsinf
+#[ $(python -c "print 'true' if "$deltaepsinf">"$deltaeps" else ''") ] && maxdeltaeps=$deltaepsinf || maxdeltaeps=$deltaeps
+echo "   Last change in epsinf is $maxdeltaeps"
+if [ $(python -c "if "$maxdeltaeps" < "$threshhy": print('true')") ]; then
+  if [ "$eps" == "$epsinf" ]; then
+    echo -e "   Iterative process ended successfully, but last eps was too mad, so continue to iterate."
+  else
+    echo -e "   Iterative process ended successfully.\n==)==)==)==)==)==)==)==)"
+    rm $newname
+    exit 0 # successfully completed task
+  fi
+fi
+#echo "I am still running!"
+sed -i 's/eps=.* /eps='$eps' /g' $newname
+sed -i 's/epsinf=.*$/epsinf='$epsinf'/g' $newname
+#echo "giter is $giter"
+#echo $((giter+=1))
+sed -i 's/\!lutil iterlutil getepsilon.*$/\!lutil iterlutil getepsilon '$threshhy' '$eps' '$epsinf'/g' $newname
+exit 1

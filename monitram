@@ -1,0 +1,8 @@
+#!/bin/bash
+while true; do
+	date >> $HOME/MemLog.$(uname -n)
+	free -m >> $HOME/MemLog.$(uname -n)
+	echo  >> $HOME/MemLog.$(uname -n)
+	sleep 300
+done
+

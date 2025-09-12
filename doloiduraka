@@ -1,0 +1,20 @@
+#!/bin/bash
+[ -z "$1" ] && echo "Cannot remove prone-to-fail jobs: no filename provided." && exit 2
+svetgorit=$(sed -n '/[@\]/!{/^ :::/{:a;N;/---/!ba;s/[\r]*\n //g;s/--//g;s/-$//;p}}' $1)
+vodate4et=$(sed -n '/[@\]/!{/^ #/{:a;N;/---/!ba;s/[\r]*\n //g;s/--//g;s/-$//;p}}' $1)
+if [ $(echo "$vodate4et" | grep -c -e 'TPSSh' -e 'LC-wPBE') -eq $(echo "$svetgorit" | grep -c -e 'ExcitedStateAbsor' -e 'ExcitedStateEmis' -e 'Polar ') ] && [ $(echo "$vodate4et" | grep -c -e 'TPSSh' -e 'LC-wPBE') -ne 0 ] && [ "${1%out}" != "$1" ]; then
+    echo "File contents before removing prone-to-fail jobs:"; sarakstu2 $1
+    filesiz=$(wc -c < $1)
+    while [ $filesiz -gt 10 ]; do
+	svetgorit=$(sed -n '1,/termination/{/[@\]/!{/^ :::/{:a;N;/---/!ba;s/[\r]*\n //g;s/--//g;s/-$//;p}}}' $1)
+	vodate4et=$(sed -n '1,/termination/{/[@\]/!{/^ #/{:a;N;/---/!ba;s/[\r]*\n //g;s/--//g;s/-$//;p}}}' $1)
+        [[ -n "$(echo "$vodate4et" | grep -e 'TPSSh' -e 'LC-wPBE')"  &&  -n "$(echo "$svetgorit" | grep -c -e 'ExcitedStateAbsor' -e 'ExcitedStateEmis' -e 'Polar ')" ]] || sed -n '1,/termination/p' $1 >> $1.nozero
+        sed -i '1,/termination/d' $1
+	filesiz=$(wc -c < $1)
+        export $filesiz
+    done
+    mv $1.nozero $1
+fi
+
+[ $(cat $1 | grep -c -e 'Normal termination') -eq 0 ] && rm $1 # rm $1
+

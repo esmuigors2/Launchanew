@@ -1,0 +1,33 @@
+#!/bin/bash
+# getepsilon version 0.4
+# Changes: adapted to the new version of launchanew (with generalized iterative utilities)
+# argument 1: threshold for epsilon
+# argument 2: epsilon (static) used in prev. iteration (e.g. 78 for water)
+# argument 3: epsilon (dynamic, or ∞) used in prev. iteration (e.g. 1.78 for water)
+# argument 4: current step of the iterative calculation
+# argument 5: name of .OUT file with alphas to use in the current iteration
+# argument 6: name of .GJF file in which eps and epsinf will be updated for the subsequent calculation
+
+#echo $@
+echo "(==(==(==(==(==(==(==(== CalcFC-every-N-steps iterating utility v. 0.2"
+mainame=$2
+echo "   Prev iteration file is $mainame"
+#lastjnr=$(cat $mainame.gjf | grep -n "Diagonal vibrational polar"); ((vibrapolarnr++))
+giter=$1 #(head -1 $mainame.getepsilon | sed 's/.* //')
+[ -z "$1" ] && echo "The creator of this script system is an idiot." && giter=$(ls -lt '*gjf' | grep "$USER" | head -1 | gawk '{print $NF}' | sed 's@'"$(pwd)"'[/]*@@')
+[ -z "$mainame" ] && mainame="${giter%.gjf}.out"
+
+if [ "$(tail "$mainame" | grep "Normal termination")" ]; then
+    echo -e "   Iterative process ended successfully.\n==)==)==)==)==)==)==)==)"
+    exit 0 # successfully completed task
+fi
+
+nummberr=$(echo "$mainame" | sed 's/.*_G//;s/.out//')
+[ -n "$(echo "$nummberr" | sed 's/[0-9]//g')" ] && echo "oops, I have to DEBUG this -- why is G number not a number?" && exit 5
+if [ $nummberr -gt 100 ]; then
+    echo -e "   Iterative process staggered and was interrupted...\n==)==)==)==)==)==)==)==)"
+    exit 1 # unsuccessfully completed task
+fi
+#echo "I am still running!"
+#sed -i 's/\!lutil iterlutil anfreqevery.*$/\!lutil iterlutil anfreqevery '$threshhy' '$eps' '$epsinf'/g' $newname
+exit 1

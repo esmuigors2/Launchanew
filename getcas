@@ -1,0 +1,6 @@
+#!/bin/bash
+sed -n '/Pairs of Alpha orbitals switched:/,/Initial guess orbital symmetries:/p' $1 | sed '$d'
+myinput=$(sed -n '/Enter MCSCF program\./,/MCSCF converged\./p' $1)
+echo "$myinput" | sed '1,/ITN=....MaxIt=/d' | sed '/WARNING/,/Step scaled by/d' |  sed -n ':a;n;/... Do an extra-iteration for final/{s/final//;x;p};t;h;ba'
+vainorbs=($(echo "$myinput" | sed -n '/Final one electron symbolic density matrix:/,$p' | grep -e '0.200000D+01' -e '0.000000' | tr -s ' '| cut -d ' ' -f 2))
+echo "Unused orbitals in CAS: ${vainorbs[@]}"

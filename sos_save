@@ -1,0 +1,13 @@
+#!/bin/bash
+sleep 10
+echo "Creating backup archive for $1..." >> $HOME/BupLog.logg
+lbackupfile=${1%.gjf}.bup.tgz
+lbackupfile2=${1%.gjf}.bup2.tgz
+tar -czf $lbackupfile ${1%.gjf}*out
+while true; do
+	sleep 1000
+	rm $lbackupfile2
+	tar -czf $lbackupfile2 ${1%.gjf}*out
+	[ $(wc -c $lbackupfile) -lt $(wc -c $lbackupfile2) ] && mv $lbackupfile2 $lbackupfile
+done
+

@@ -1,0 +1,17 @@
+#!/bin/bash
+
+dononstdpcm=false
+if [ "$1" == "-s" ]; then
+    dononstdpcm=true
+    shift;
+fi
+
+echo $1
+
+sed -n '/GINC/,/ob cpu tim/!{/^ :::/{:a;N;/----/!ba;	s/[\r]*\n //g;s/--//g;s/-$//;p}; /^ #/{:a;N;/----/!ba;s/[\r]*\n //g;s/--//g;s/-$//;p}}' $1
+($dononstdpcm) && sed -n '/Using the following/,/end of non-standard/{/Using the followin/s/.*/-------------------/;/end of non-standard/s/.*/ /;p}' $1
+
+# sed -n '/[\@]/!{/^ :::/{:a;N;/----/!ba;
+#	s/[\r]*\n //g;s/--//g;s/-$//;/[\@]/!p};
+#	 /^ #/{:a;N;/----/!ba;s/[\r]*\n //g;
+#	s/--//g;s/-$//;/[\@]/!p}}' $1

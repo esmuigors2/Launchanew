@@ -1,0 +1,1032 @@
+#!/bin/bash
+# I hope this will be useful...
+echo "----------------------------------------------------------------------------"
+echo "Launchanew version 0.9.0.4.2"
+echo "------------------  $0  -----------------"  # if I forget to update the numbers...
+
+### Changes: in the lib (rearranging solutions for linear search failures in SCF, adding the safe VShift option)
+#    Also, 
+# Change archive:
+#    0.9.0.4.1: getridofdirt now exits when there is another Gaussian running (will only work if all Gaussians are same major releases)
+#    0.9.0.4.0: should not redirect output to SCRATCH if it is STDOUT...
+#    0.9.0.3.9: added -Z/--notar option to not compress outputs (useful for external scripts)
+#    0.9.0.3.8: temp solution for sudden cycling with a single input file -- happens when run out of resources and no new file can be created
+#    0.9.0.3.7: repaired (it seems) the possibly faster Gen BS subst; tried to adapt for Opt Freq in a single route line
+#    0.9.0.3.6: debugging the same addition
+#    0.9.0.3.5: oops with the same addition
+#    0.9.0.3.4: debugged last addition
+#    0.9.0.3.3: much faster file splitting; also, possibly faster Gen BS subst
+#    0.9.0.3.2: the problem was most likely with the first job not being removed (could be useful for _fbk but not for regulars)
+#    0.9.0.3.1: tracing strange errors
+#    0.9.0.3.0: to prevent consec. errors case, we also need shorter file names -- hence autosplit added, with option -I n
+#    0.9.0.2.9: in the lib (not freaking out if too many consec. errors)
+#    0.9.0.2.8: a little bug in the GenBS subdt. cycle (corrected?)
+#    0.9.0.2.7: should not launch monitram if the current user is already running it; corrected bugs in renaming directories
+#    0.9.0.2.6: forgot to add the jobs not using Gen when replacing the Gen with actual BS name in the comment
+#    0.9.0.2.5: error in Gen/GenECP cycles was (hopefully) removed or remedied; in the lib (now should also add the additional in-line parameters frm the geometry, like in ONIOM)
+#    0.9.0.2.4: in the lib (mistake in reading the non-existent geometry from the failed .out)
+#    0.9.0.2.3: in the lib (mistake in geomfromdone)
+#    0.9.0.2.2: now should substitute the Gen(ECP) for each job separately
+#    0.9.0.2.1: if told to do so, try to increase grid fineness
+#    0.9.0.2.0: in the lib (tried to resolve a stupid sed usage error because the range was not specific enough)
+#    0.9.0.1.9: now tries to check whether all directory paths within the file actually exist, and changes them to $(pwd) if one does not
+#    0.9.0.1.8: now, -p option requires an argumant and can set up the number of cores used (0 if not to be modified)
+#    0.9.0.1.7: now also prints out GAUSS_EXEDIR
+#    0.9.0.1.6: tried to solve the issue with changedir
+#    0.9.0.1.5: tried to solve not exiting on Debian while not causing it on Ubuntu (seems successful)
+#    0.9.0.1.4: debugging lnwasplanned issue; hopefully allowing to solve CPHF issues for QSCF
+#    0.9.0.1.3: should now not enter endless cycle when General basis set is found inside file; fchks are now always archived and moved to GAUSS_LAUNCHDIR
+#    0.9.0.1.2: proc2gjf should now not increase Mem if PBS_JOBID is non-zero; abort if GENBASISSET is not present but Gen/GenECP is
+#    0.9.0.1.1: small fix to allow launching in Moab/Torque batch mode and having log file in the right place (did not work)
+#    0.9.0.1.0: monitorchk in the service mode was called wrong way, prone to fail
+#    0.9.0.0.9: du again (also in the lib)
+#    0.9.0.0.8: now du is not called if certain scratch dir does not exist
+#    0.9.0.0.7: adapted for use on RTU HPC, too
+#    0.9.0.0.6: in the lib (generalized SPRSCRDIR use); listed used external scripts in the header comments; trying to solve disappearing checkpoints
+#    0.9.0.0.5: iterlutil was made a little more bearable (I hope)
+#    0.9.0.0.4: in the lib (trying to solve disappearing checkpoints and gjfs)
+#    0.9.0.0.3: in the lib (trying to solve disappearing checkpoints); attempts to make the takeover work at least after the running instances of launchanew have been terminated
+#    0.9.0.0.2: in the lib (erasedefectous issues)
+#    0.9.0.0.1: in the lib (erasedefectous issues, new case to checkput -- solvent=generic w/o eps=)
+#    0.9.0.0.0: in the lib (trying to resolve _1_2_1_2_1_2)
+#    0.8.9.9.9: in the lib (no more filename-too-long, I hope)
+#    0.8.9.9.8: some changes in the lib related to imgsolver and noclobber shell option
+#    0.8.9.9.t: minor changes in the lib
+#    0.8.9.9.6: heavily rewritten geomsolver and aux fxns (in the lib)
+#    0.8.9.9.5: tried to resolve multiple problems around geomsolver which did not work (in the lib); some other minor debugging; cleaning up after all jobs have ended
+#    0.8.9.9.4: tried to resolve a problem in scpcmsolver_redo which did not work (in the lib)
+#    0.8.9.9.3.1: trying to deter addition of Stable=Opt/Opt=CalcAll if such are already present
+#    0.8.9.9.3: continuing to adapt for (Opt=CalcFC now as iterlutil); in the lib (erasedefectous)
+#    0.8.9.9.2: in the lib (Opt=CalcFC now as iterlutil)
+#    0.8.9.9.1: removing du catastrophy; some minor changes in the library
+#    0.8.9.9.0: in the lib (+ 1 error); small adjustment in NowLog system (investigation for the further adjustments)
+#    0.8.9.]8.9: checking environment variables at the beginning; added a brief logging system to see how are things going (NowLog.HOSTNAME)
+#    8.8.9:   shifting geometries of transition states automatically; also, now rwf2gjf is automatically launched for all cases when there are more than 50 atom
+#    8.8.7:   again, trying  to make the tough SC-PCM fallbacking work
+#    8.8.6:   in the library (solver variables were returned to 0 after generategjf returned)
+#    8.8.4.9: in the library (all related to fallbacking)
+#    8.8.4.8: in the library
+#    8.8.4.7: small errors (getridofdirt and others); now .chk files are deleted by default
+#    8.8.4.6: help was not displayed -- output was redirected too early...
+#    8.8.4.5: in the library (geomsolver)
+#    8.8.4.4: in the library
+#    8.8.4.3: in the library (attempts to solve the bad-file-opened and l1-forever errors)
+#    8.8.4.1: attempts to solve the bad-file-opened and l1-forever errors; also, in the library
+#    8.8.4.0: now, to reduce the newtork traffic, both chkpoints and outs are strictly on local machine
+#    5.9.0.7: in the library (removed another redundant solver cancellation (in checkout()); corrected another stupid mistake)
+#    5.9.0.6: in the library (less unneeded printout; NonEq=Read now always triggers scpcmsolver)
+#    5.9.0.5: in the library (stupid error about how to check file size; fallbacking and other things)
+#    5.9.0.4: in the library (fallbacking and other things)
+#    5.9.0.3: in the library (fallbacking and other things)
+#    5.9.0.1: in the library (fallbacking and other things)
+#    5.9.0.0: hopefully introduced the takeover possibilities; corrected some apparent mistakes for fallbacking mechanism; and some thing in iterative utils mechanism
+#    5.8.7.7: in the library (not cancelling geomopt solving when next job has CalcAll and the current one does not)
+#    5.8.7.6: now the -i option changes every CHK path found in the input file
+#    5.8.7.5: added a safeguard against possible fork bomb when the executable is not found
+#    5.8.7.0: proc2gjf -o is now called after each job (including failed jobs); corrected some little errors w.r.t SC-PCM solving (variables were not assigned initial values here)
+#    5.8.6.0: in the library (canceling redundant solutions; also, added VTL and IOp(5/108=10) to SCF solver)
+#    5.8.5.0: by mistake, regclean did not reset with -a option; also, less output from du; and small mistake with grep on lines 304, 325
+#    5.8.4.0: in the library (see library - mainly concerning SC-PCM problems); now reporting how many jobs were completed to the LOGG file immediately after the run, and in any case
+#    5.8.3.0: in the library (L508 problems)
+#    5.8.2.0: in the library (new way to cancel vain solver cycles)
+#    5.8.1.0: in the library (withdraw the solver if _2_2_2_2_2.out for SC-PCM); hoping to exit if the library would be not found
+#    5.8.0.0: in the library (trying to solve difficult SCI-PCM problems, as well as [S]SD problems)
+#    5.7.9.0: in the library (dealing with fallbacking problems again)
+#    5.7.6.0: adding FullLinear to the SCF solver; adding support for launching other versions of Gaussian (via GAUSS_EXEDIR)
+#    5.7.8.0: in the library (continued trying to deal with the NDamp=20 being added unrestrictedly)
+
+# USED EXTERNAL SCRIPTS #
+# doloiduraka
+# linda2gjf
+# monitram
+# proc2gjf
+# rwf2gjf
+# sarakstu1
+## sos_save
+
+# EXTERNAL SCRIPTS USED IN THE LIBRARY #
+# anfreqevery
+# findminstep
+# findmingeom
+# rwf2gjf
+# sarakstu2
+# shift_coords.py
+
+# POSSIBLE UTILITIES TO BE USED #
+# anfreqevery
+# getcas
+# getepsilon
+# gettsqst
+# 
+
+
+if [ -n "$(echo "$GAUSS_EXEDIR" | grep g09)" ]; then
+    [ -z "$(echo "$PATH" | grep g09)" ] && echo 'Gaussian executable not found! Check the settings of Your environment.' && exit 5
+elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g16)" ]; then
+    [ -z "$(echo "$PATH" | grep g16)" ] && echo 'Gaussian executable not found! Check the settings of Your environment.' && exit 5
+elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g03)" ]; then
+    [ -z "$(echo "$PATH" | grep g03)" ] && echo 'Gaussian executable not found! Check the settings of Your environment.' && exit 5
+elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g98)" ]; then
+    [ -z "$(echo "$PATH" | grep g98)" ] && echo 'Gaussian executable not found! Check the settings of Your environment.' && exit 5
+else
+    echo 'Gaussian environment variables are not set! Check the settings of Your environment.' && exit 5
+fi
+
+[ "$GAUSS_SPRSCRDIR2" == "$GAUSS_SCRDIR" ] && GAUSS_SPRSCRDIR2="" && export GAUSS_SPRSCRDIR2
+[ "$GAUSS_SPRSCRDIR" == "$GAUSS_SCRDIR" ] && GAUSS_SPRSCRDIR="" && export GAUSS_SPRSCRDIR
+[ "$GAUSS_SPRSCRDIR2" == "$GAUSS_SPRSCRDIR" ] && GAUSS_SPRSCRDIR2="" && export GAUSS_SPRSCRDIR2
+[ -z "$GAUSS_SCRDIR" ] &&  echo 'Gaussian environment variable GAUSS_SCRDIR is not set! Check the settings of Your environment.' && exit 6
+#[ -z "$GAUSS_SPRSCRDIR" ] &&  echo 'Gaussian environment variable GAUSS_SPRSCRDIR is not set! Check the settings of Your environment.' && exit 6
+[ -z "$GAUSS_LNCHDIR" ] && GAUSS_LNCHDIR=$(pwd)
+
+mygorgeouspid=$$
+
+. $HOME/bin/liblaunchanew.2025.08.12 || { echo "LIBRARY NOT FOUND OR NOT WORKING!!!!! EXITING!"; exit 2; }
+
+###################### FUNCTION TO DISPLAY REQUIREMENTS/DEPENDENCIES FOR THE SCRIPT ###############################
+
+whatineedfunc(){
+    echo ; echo "USAGE REQUIREMENTS:"
+    echo "1. $(tput setaf 6)perl$(tput sgr0); $(tput setaf 6)sed$(tput sgr0); $(tput setaf 6)awk$(tput sgr0); if You want to use problem solver, then also $(tput setaf 6)python$(tput sgr0). This was tested on cluster with quite ancient versions of them, so hopefully Yours will not be too old..."
+    echo "2. input files are encouraged to have title section constructed in the following manner:"
+    echo -e "\t::: input_geometry_filename* output_geometry_filename* job_group_name** job_processing_sub_name multistep_job_name** job_step_in_multistep_job***"
+    echo "* should match if not optimization"
+    echo "** we use automated extraction of job results and storing in database in the form of spreadsheet files; hence, $(tput setaf 5)job_group_name$(tput sgr0) is the name of a sheet inside such a file (one file for each compound); $(tput setaf 5)multistep_job_name$(tput sgr0) is the name of compound job -- it is useful to group Your jobs in the batch file; for instance, Ionization job consists of three steps (neutral molecule, cation, anion), with $(tput setaf 5)multistep_job_name$(tput sgr0)=Ionization and $(tput setaf 5)job_step_in_multistep_job$(tput sgr0)=(1; 2; 3). ExcitedStateAbsorption will have the 1st step -- a single point with storing the 'slow' component of the reaction field and the 2nd step -- the TD calculation itself."
+    echo -e "$(tput bold)For launchanew to work FULLY properly (this dependence is now removed for the most of code, but parts intrinsically connected to multistep jobs cannot be freed from this dependence), You only need to set $(tput setaf 5)multistep_job_name$(tput sgr0; tput bold) and $(tput setaf 5)job_step_in_multistep_job$(tput sgr0; tput bold) for each job title section -- why this is needed can be seen in description for options -c and -d.$(tput sgr0) For example, You can use such title section:\n\t::: a b c d e 1\n$(tput bold)Notice, however,$(tput sgr0) that the first step of a geometry optimization is recognized by matching 'GeometryOptimization 1', but You can modify the script to match Your names. We actually advice You to use such a naming system -- it is really convenient to use for large batches of computations."
+    echo "Sometimes there is need for jobs that are not going to be archived (not like it is defined by Gaussian, as any job with IOps is NOT archived by default). For example, fragmented or other sophisticated guesses, or jobs froducing natural orbitals, etc. We are used to mark such jobs by setting their geometries to 0000_000 0000_000 (see description of -z keyword)."
+    echo "*** an integer from 1 to 9 (can You imagine a job with 10 steps?!)"
+    echo "3. You must add to Your ~/.bashrc or ~/.bash_profile the following:"
+    echo -e "\t [ -z \"$GAUSS_LNCHDIR\" ] && GAUSS_LNCHDIR=/path/to/directory/usually/containing/input/output/and/checkpoint/files # this is now optional, a fallback variant"
+    echo -e "\t GAUSS_SPRSCRDIR=/path/to/additional/scratch/directory/other/than/one/set/in/GAUSS_SCRDIR # this is optional"
+    echo -e "\t export \$GAUSS_SPRSCRDIR \$GAUSS_LNCHDIR"
+    echo "4 (optional). lutil commands marked as Gaussian comments (starting with $(tput setaf 3)!lutil$(tput sgr0) in an input file). We use these for things like splitting large batch jobs so that output files are easier to be proceeded ($(tput setaf 3)!lutil echo 'Splitting..'$(tput sgr0)), or producing formatted checkpoint files right during  the batch job ($(tput setaf 3)!lutil formchk chk_name.chk$(tput sgr0)). As You can see, everything after the keyword !lutil is just executed as a bash command. When a !lutil line is encountered, the input file is split into two parts, named as /path/to/input/file_U1.gjf, /path/to/input/file_U2.gjf, and so on. $(tput bold)If You don't use them, it is OK for the script to work properly.$(tput sgr0)"
+}
+
+#################################### SETTING DEFAULT VARIABLE VALUES AND CHECKING COMMAND-LINE OPTIONS ############################
+
+regtagad=true; regclean=true; helpme=false; stopifchk=true; multistepchk=true; useoldchk=false; trysolve=1; solvescf=0; solvefmm=0; solvecphf=0; solvegeom=0; solverwf=0; solvemcscf=0; solvecav=0; solveacc2=0; solvescpcm_redo=0; solvescpcm=0; solveimg=0; calcfcevery=20; numproc=0; notarr=false
+debugging=false
+rmzero=true; rmdurakov=false; remmaxder=""; ramparam=false; whatineed=false; modrwf=true; nodalek=false; modproc=true; exitcodd=0; addlinda=""; changedir=false; nomaxdisk=false; takeover=false; preservechk=false; shsaddle=true; banginghead=false; watchoverchk=false; gofiner=false; neverstop=false; nintersperse=10
+
+while getopts "abcdefghijkl:mnop:qrstuvwxyzI:Z" myopts; do
+    case $myopts in
+    r) regtagad=false ;;
+    a) regclean=false ;;
+    d) stopifchk=false ;;
+    c) multistepchk=false ;;
+    o) useoldchk=true ;;
+    n) watchoverchk=true ;;
+    f) preservechk=true ;;
+    t) takeover=true ;;
+    g) shsaddle=false ;;
+    e) calcfcevery=$OPTARG ;;
+    i) changedir=true ;;
+    j) gofiner=true ;;
+    s) trysolve=0;;
+    b) banginghead=true ;;
+    z) rmzero=false;;
+    m) ramparam=true;;
+    u) rmdurakov=true;;
+    y) neverstop=true;;
+    w) modrwf=false;;
+    p) numproc=$OPTARG; [ $numproc -eq 0 ] && modproc=false;;
+    k) nodalek=true;;
+    l) addlinda="$OPTARG";;
+    x) nomaxdisk=true;;
+    I) nintersperse="$OPTARG";;
+    Z) notarr=true;;
+    v) debugging=true;;
+    h) helpme=true;;
+    q) whatineed=true;;
+    \?) echo "Some specified options ($myopts) were not recognized by getopts. Try launchanew -h for information about available options." ;; # for cases of "invented" options
+    esac
+done
+shift "$((OPTIND-1))"
+while [[ "$#" -gt 0 ]]; do
+    if [[ -z "$(echo $1 | grep -e "^-")" ]]; then break; else shift; fi
+    case "$1" in
+    --remove)       regtagad=false; shift ;;
+    --noalltimeneat) regclean=false; shift ;;
+    --ccheck)       multistepchk=false; shift ;;
+    --nodscheck)    stopifchk=false; shift ;;
+    --useoldchk)    useoldchk=true; shift ;;
+    --preservechk)  preservechk=true; shift ;;
+    --monitorchk)   watchoverchk=true; shift ;;
+    --takeover)     takeover=true; shift ;;
+    --shsaddle)     shsaddle=false; shift ;;
+    --calcfcevery)  calcfcevery=$OPTARG; shift 2 ;;
+    --changedir)    changedir=true; shift ;;
+    --notrysolve)   trysolve=0; shift;;
+    --banginghead)  banginghead=true; shift;;
+    --okzero)       rmzero=false; shift;;
+    --nostupid)     rmdurakov=true; shift;;
+    --neverstop)    neverstop=true; shift;;
+    --norwfmod)     modrwf=false; shift;;
+    --noprocmod)    modproc=false; shift;;
+    --nomaxdisk)    nomaxdisk=true; shift;;
+    --gofiner)      gofiner=true; shift;;
+    --nodalek)      nodalek=true; shift;;
+    --addlinda)     addlinda="$2"; shift 2;;
+    --nintersperse) nintersperse="$2"; shift 2;;
+    --notar)        notarr=true; shift;;
+    --debugging)    debugging=true; shift;;
+    --monram)       ramparam=true; shift;;
+    --help)         helpme=true; shift ;;
+    --requirements) whatineed=true; shift ;;
+    -*)     echo "Some specified options ($1) were not recognized. Try launchanew -h for information about available options."; shift ;; # for cases of "invented" options
+    *) ;;
+    esac
+done
+#shift "$((OPTIND-1))"
+
+if [[ "$#" -gt 2 ]]; then helpme=true; whatineed=true; fi
+
+if (! $takeover); then
+    if ( $helpme ) || [[ "$#" == 0 ]]; then
+        echo; echo "Usage: $(basename $0) [OPTIONS] /path/to/inputfile.gjf [/path/to/outputfile.out] [&> /path/to/logfile.logg] &"
+        echo "--------------------------------------------------------------------------"
+            helpings
+        ( $whatineed ) && whatineedfunc
+        echo "--------------------------------------------------------------------------"
+        exit 0
+    fi
+fi
+
+myoldlogg=$(readlink -f /proc/"$$"/fd/1)
+myoldlogg=$(echo "$myoldlogg" | sed 's@/mnt/beegfs2/home@/home_beegfs@')
+if [ -z "$(echo "$myoldlogg" | grep '/dev/pts')" ]; then
+    [ ! -d  "${GAUSS_SCRDIR}/log" ] && mkdir -p "${GAUSS_SCRDIR}/log"
+    cp "$myoldlogg" "${GAUSS_SCRDIR}/log/"
+    exec 1>>"${GAUSS_SCRDIR}/log/$(basename "$myoldlogg")"
+    exec 2>&1
+    monitlog "${GAUSS_SCRDIR}/log/$(basename "$myoldlogg")" "$myoldlogg" &
+fi
+if ($debugging); then
+    echo "Currently file descriptors are as follows:"
+    ls -l /proc/"$$"/fd
+fi
+
+
+if ($takeover); then
+    if [ -n "$(ps aux | grep '[g]16')" ]; then
+        gausch="16"
+    elif [ -n "$(ps aux | grep '[g]09')" ]; then
+        gausch="09"
+    elif [ -n "$(ps aux | grep '[g]03')" ]; then
+        gausch="03"
+    else
+        gausch="98"
+    fi
+    gausfds=($(ls -l /proc/$(ps aux | grep '[g]'"$gausch"'$' | xargs | cut -d ' ' -f 2)/fd | rev | cut -d ' ' -f 1 | rev))
+    if [ -n "${gausfds[1]}" ]; then # takeover is possible
+        echo "Trying to take over the calculation with input file ${gausfds[1]}..."
+        useoldchk=true
+        #lanewpid=$(ps aux | grep '[l]aunchanew' | xargs | cut -d ' ' -f 2)
+        #[ -n "$lanewpid" ] && kill -9 $lanewpid
+    else
+        echo "No running Gaussian found -- takeover is impossible! Continuing as it would usually be."
+        takeover=false # this line prevents these two ifs from being merged
+    fi
+fi
+
+if ($takeover); then
+    iniladir=$(grep -m 1 'Initial launching directory is' "${gausfds[3]}" | sed 's/Initial launching directory is //')
+    #exec 1>>"${gausfds[3]%.logg}_tko.logg" # redirecting output and error to the logfile
+# no, must set that manually at the launching time
+    let_me_die=false
+    if [ -n "$(echo "${gausfds[@]}" | grep "(deleted)")" ]; then
+        echo "Whoops! Some of the files used by Gaussian were DELETED! You should really start worrying now!"
+        echo "Whoops! Some of the files used by Gaussian were DELETED! You should really start worrying now!" >$(tty)
+        gausfds=($(ls -l /proc/$(ps aux | grep '[g]'"$gausch"'$' | xargs | cut -d ' ' -f 2)/fd | sed 's@ (deleted)@@' | rev | cut -d ' ' -f 1 | rev))
+        echo "Trying to take over the calculation with input file ${gausfds[1]}..."
+        let_me_die=true
+    fi
+    echo "We determined the following file descriptor information for the Gaussian process:
+        ${gausfds[0]} -- the parent device, which contains its input fd
+        ${gausfds[1]} -- input file
+        ${gausfds[2]} -- output file
+        ${gausfds[3]} -- log file."
+    ls -l /proc/$(ps aux | grep '[g]'"$gausch"'$' | xargs | cut -d ' ' -f 2)/fd 
+    echo "==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f==f=="
+    exec 2>&1
+    GAUSS_LNCHDIR=$(dirname "${gausfds[1]}")
+    cd "$GAUSS_LNCHDIR"
+    gausfds[1]=$(basename "${gausfds[1]}")
+    gausfds[2]=$(basename "${gausfds[2]}")
+    #gausfds[3]=$(basename "${gausfds[3]}")
+    [ -n "$(echo "${gausfds[1]}" | grep -e '.gjf$')" ] && curinfile="${gausfds[1]}" || curinfile=$(ls -lt *gjf | head -1 | gawk '{print $NF}')
+    firstcurinfile=$(echo "${curinfile}" | sed 's@_U[0-9G_fbk]*.gjf@@')
+    [ "${firstcurinfile%.gjf}" == "$firstcurinfile" ] && firstcurinfile="${firstcurinfile}.gjf"
+    nextcurinfile=$(echo "$curinfile" | sed 's/\(_[0-9G]\+\)*.gjf//' )
+    nextilutilfile=$(echo "$curinfile" | sed 's/\(_[0-9]\+\)*.gjf//')
+    nowlutil_to=${nextcurinfile##*_U}
+    nowilutil_to=${nextilutilfile##*_G}
+    nowlutil_to=${nowlutil_to%%_*}
+    nowilutil_to=${nowilutil_to%%_*}
+    nextcurinfile="${nextcurinfile%_U*}_U$((nowlutil_to+1)).gjf"
+    nextilutilfile="${nextilutilfile%_G*}_G$((nowilutil_to+1)).gjf"
+    [ -n "$(echo "${gausfds[2]}" | grep -e '.out$')" ] && curoutfile="${gausfds[2]}" || curoutfile="${firstcurinfile%gjf}out"
+else
+    iniladir=$(pwd)
+    echo "Initial launching directory is $iniladir"
+    curinfile=$1
+    firstcurinfile=$curinfile
+    [[ -z $2 ]] && curoutfile="${curinfile%gjf}out" || curoutfile=$2
+    mkdir "$GAUSS_SCRDIR/${1%.gjf}"
+    cp "$1" "$GAUSS_SCRDIR/${1%.gjf}/"
+    cd "$GAUSS_SCRDIR/${1%.gjf}"
+    GAUSS_LNCHDIR=$(pwd)
+    sed -i 's@'"$iniladir"'@'"$GAUSS_LNCHDIR"'@g' "$1"
+fi
+myoldlogg="${iniladir%/}/$(basename "$myoldlogg")"
+echo "Current working directory is: $GAUSS_LNCHDIR"
+export GAUSS_LNCHDIR
+
+#sos_save $firstcurinfile &
+# (Hopefully) solve geometry inconsistencies (blank lines among Cartesians - happens, You know)
+#sed -i '/[0-9.-][0-9.-]*/{:a;N;/--Link1--/!ba;s/(\([0-9.-][0-9.-]*\)\n\n\([ ]*[A-Za-z][A-Za-z]*[ ]*[0-9.-][0-9.-]*\))/\1\n\2/}' $curinfile
+
+    [ -n "$curinfile" ] && [ -n "$GAUSS_SPRSCRDIR" ] && [ -n "$(grep $GAUSS_SPRSCRDIR $curinfile)" ] && [ ! -d $GAUSS_SPRSCRDIR ] && mkdir $GAUSS_SPRSCRDIR # if exists, an error will not be printed
+
+    [ -z "$GAUSS_LNCHDIR" ] && whatineed=true
+
+###################################### DISPLAYING HELP AND OTHER ABORTS ###############################
+
+    if ( $helpme ) || { [[ "$#" == 0 ]] && ( ! $whatineed ) && (! $takeover); }; then
+        echo; echo "Usage: $(basename $0) [OPTIONS] /path/to/inputfile.gjf [/path/to/outputfile.out] [&> /path/to/logfile.logg] &"
+        echo "--------------------------------------------------------------------------"
+            helpings
+        ( $whatineed ) && whatineedfunc
+        echo "--------------------------------------------------------------------------"
+        exit 0
+    elif ( $whatineed ); then
+        whatineedfunc; exit 0
+    elif [ -f $curoutfile ] && (! $takeover); then
+        echo -e "Please archive or delete old files with specified names first.\nNames causing problem:  $curoutfile"
+        exit 1
+    elif [ ! -f $curinfile ]; then
+        echo "No input file! Something went wrong..."
+        exit 1
+    elif [ -n "$(grep '^#' "$curinfile" | grep '/Gen')" ] && [ -z "$(grep '==GENBASISSET==' "$curinfile")" ]; then
+        echo "Please put the name of Your Gen basis/-es into the file as comments."
+        echo "You can use:"
+        echo 'sed -i '"'"'/\*\*\*\*$/{N;/[[:alnum:]]\+/!s@\*\*\*\*@&\n!==GENBASISSET== YOUR_BASIS_NAME @}'"'"' '"$curinfile"
+        exit 1
+    fi
+
+############################ REPORTING STATUS OF GLOBAL-SCOPE VARIABLES ############################
+
+    echo ""
+    echo "----------------------------------------------------------------------------"
+    ( $regclean ) && echo "Will maintain scratch directories clean after each failed job." || echo "Will NOT clean up scratch directories."
+    ( $regtagad ) && echo "Will wipe out everythin in the scratch directories right now!" || echo "Will NOT clean up scratch directories now."
+    if ( $stopifchk ); then
+        echo "Will omit jobs with CHK modified by failed jobs."
+    elif ( $multistepchk ); then
+        echo "Will omit jobs with CHK modified by failed jobs ONLY until the next GeometryOptimization."
+    else
+        echo "Will NOT omit any job with CHK modified by failed jobs."
+    fi
+    ( $useoldchk ) && echo "Will use old CHK files in this run." || echo "Will warn and stop if some of CHKs used in this input are already present in the working directory"
+    ( $changedir ) && echo "Will change the paths to CHK and RWFs to match the current directory." || echo "Will NOT change the paths to CHK and RWFs to match the current directory."
+    [ $trysolve -gt 0 ] && echo "Will try to solve SCF convergence, integration and Opt=CalcAll issues." || echo "Will not try to solve anything."
+    ( $rmzero ) && echo "Will remove from output files jobs whose title section starts with ::: 0000_000." || echo "Jobs whose title section starts with ::: 0000_000 will be treated as ordinary jobs."
+    ( $rmdurakov ) && echo "Will delete output file if it contains no 'Normal termination's or a functional lacked abilities for a compound job."
+    ( $modrwf ) && echo "Will modify RWF, Int and D2E file sizes according to the sizes of $GAUSS_SPRSCRDIR and $GAUSS_SCRDIR." || echo "Will NOT modify RWF, Int and D2E file sizes according to the sizes of $GAUSS_SPRSCRDIR and $GAUSS_SCRDIR, assuming this has been done more carefully."
+    ( $modproc ) && [ $numproc -eq 0 ] && echo "Will modify number of CPU cores and amount of assigned RAM to meet the aptitude of the machine." || { ( $modproc ) && echo "Will modify number of CPU cores to $numproc and amount of assigned RAM  accordingly." || echo "Will NOT modify number of CPU cores and amount of assigned RAM."; }
+    [ -n "$addlinda" ] && echo "Will add / modify LindaWorkers directive"
+    ( $nodalek ) && echo "Will make the job invincible to dalek." || echo "Dalek can exterminate this job if it thinks it's appropriate."
+    ( $ramparam ) && echo "Will monitor RAM usage to stalk possible problems." || echo "Will not monitor RAM usage."
+    ( $preservechk ) && echo "Will not delete checkpoint files after al jobs have been finished." || echo "Will DELETE checkpoint files after al jobs have been finished."
+    ( $shsaddle ) && echo "Will try to solve geometry optimizations reaching saddle points" || echo "Will NOT try to solve geometry optimizations reaching saddle points"
+    echo "If solving of geometry optimization problems is enabled, will calculate the analytic force constants $calcfcevery steps"
+    echo "----------------------------------------------------------------------------"
+    echo ""
+
+##################################### PREPARING FOR THE LAUNCH (ACTUAL THINGS ARE STARTED) ################################
+
+    if ($takeover); then
+        echo "Taking over the calculation for $curinfile on $HOSTNAME at $(date)..." >> $HOME/CalcLog.logg.$HOSTNAME
+    else
+        dos2unix $curinfile
+        [ -f "$HOME/CalcLog.logg.$HOSTNAME.1" ] && mv -f $HOME/CalcLog.logg.$HOSTNAME.1 $HOME/CalcLog.logg.$HOSTNAME.2
+        [ -f "$HOME/CalcLog.logg.$HOSTNAME" ] && mv -f $HOME/CalcLog.logg.$HOSTNAME $HOME/CalcLog.logg.$HOSTNAME.1
+        touch $HOME/CalcLog.logg.$HOSTNAME
+        ( $ramparam ) && [ -z "$(ps aux | grep "$USER" | grep -e '[m]onitram')" ] && monitram &
+
+        ( $nomaxdisk ) && sed -i '/#/s/ MaxDisk=[^ ]*//I' $curinfile
+        if ( $modrwf ); then
+            [ -n "$(grep -m 1 -i '%RWF=' "$curinfile")" ] || [ $(countato "$curinfile") -gt 53 ] && rwf2gjf $curinfile # must have the test about how many (max) atoms are there and if above a certain threshold, obligatory rwf2gjf
+        fi
+        [ -n "$addlinda" ] && linda2gjf $curinfile ${addlinda//,/ }
+        #tac $curinfile | sed '1,
+        # I hope this will solve the issue (replaced I for i to mean "case-insensitive")
+        perl -0644 -i -pe 's/\n(.*[\S]+)\n(--Link1--)/\n$1\n\n$2/ig' $curinfile # adding newlines before --Link1-- if they are missing
+        perl -0644 -i -pe 's/(--Link1--)\n\n--Link1--/$1/ig' $curinfile # removing spurious --Link1--
+        >> $curinfile # adding last newline 'just in case'
+    fi
+    listchk=""; foolproof $curinfile && goodchk=true || goodchk=false
+    ( ! $useoldchk ) && { ( $goodchk ) || { echo -e "Please either alter names of .CHK files used in the input file or delete old ones!\nNames causing problem:  $listchk";  exit 1; }; }
+    unset listchk; getfchklist $curinfile; listchk=( $(echo $listchk | sed 's/^ //' | sed 's/ $//' | sed 's/\/.*\///') )
+    if ($takeover); then
+        oldlistchk=(  $(echo ${listchk[@]}) )
+        getfchklist $nextcurinfile
+        listchk=( ${oldlistchk[@]} $(echo $listchk | sed 's/^ //' | sed 's/ $//' | sed 's/\/.*\///') )
+    fi
+
+    ( $nodalek ) && touch $HOME/antidalek.$(uname -n)
+
+    if [ -n "$(grep -m 1 -i '%Chk=' $curinfile)" ] && ( $changedir ); then # must come before getridofdirt, as chk names must be adjusted beforehand
+        curwrkdir="$(pwd)"; curwrkdir=${curwrkdir//\//\\/}
+        presentpath=($(gawk -F '/' 'BEGIN { OFS = FS };NF{NF--};1' <(grep -i -e '^%Chk=' -e '^%OldChk=' "$curinfile" | cut -d '=' -f 2; grep -i -e '^[ ]*!lutil' "$curinfile" | grep -o -e '\s/[^ ]\+') | gawk '{print $1}' | sort -u))
+        for yui in ${presentpath[@]}; do
+            presentpatha=${yui//\//\\/}
+            echo "Substituting $presentpatha with $curwrkdir ..."
+            sed -i 's/'"$presentpatha"'/'"$curwrkdir"'/g' $curinfile
+        done
+    fi
+    curwrkdir="$(pwd)"; curwrkdir=${curwrkdir//\//\\/}
+    presentpath=($(gawk -F '/' 'BEGIN { OFS = FS };NF{NF--};1' <(grep -i -e '^%Chk=' -e '^%OldChk=' "$curinfile" | cut -d '=' -f 2; grep -i -e '^[ ]*!lutil' "$curinfile" | grep -o -e '\s/[^ ]\+'; grep -i -e '^%RWF=' -e '^%Int=' -e '^%D2e=' "$curinfile" | cut -d '=' -f 2 | cut -d ',' -f 1,3,5 | tr ',' $'\n') | gawk '{print $1}' | sort -u))
+    for yui in ${presentpath[@]}; do
+        presentpatha=${yui//\//\\/}
+        if [ ! -d "$yui" ] && [ "$presentpatha" != "$curwrkdir" ]; then
+            echo "$yui does not exist on this system!"
+            echo "Substituting $yui with $curwrkdir ..."
+            sed -i 's/'"$presentpatha"'/'"$curwrkdir"'/g' $curinfile
+        fi
+    done
+
+    if ( $regtagad ) && (! $takeover); then
+        echo -e "\n----------------------------------------------------------------------------"
+        getridofdirt "$curinfile"
+            mauritius=$(grep -m 1 -i "%RWF=" $1)
+            if [ -n "$(echo $mauritius)" ]; then
+                mauritius=$(grep -m 3 -i -e "^%RWF=" -e "^%INT=" -e "^%D2E=" "$1" | sort -u | sed 's/.*=//;s/,[0-9]\+[MG][BW]/ /Ig')
+                rm $mauritius
+                echo "Removed scratch files $mauritius..."
+            fi
+        echo -e "----------------------------------------------------------------------------\n"
+    fi
+
+    #[ -f "$HOME/CalcLog.logg.CalcLog.logg.$HOSTNAME" ] && [ $(wc -l < $HOME/CalcLog.logg.$HOSTNAME) -gt 200 ] && { echo "Cleaning up host's CalcLog..."; sed -n '1,'"$(($(cat $HOME/CalcLog.logg.$HOSTNAME | wc -l)-200))"'p' "$HOME/CalcLog.logg.$HOSTNAME" >> "$HOME/CalcLog.logg.$HOSTNAME.1"; sed -i '1,'"$(($(cat $HOME/CalcLog.logg.$HOSTNAME | wc -l)-200))"'d' "$HOME/CalcLog.logg.$HOSTNAME"; } # now this is done by asking at login
+    [ -f "$HOME/CalcLog.logg.CalcLog.logg.$HOSTNAME.1" ] && [ $(wc -l < $HOME/CalcLog.logg.$HOSTNAME.1) -gt 500 ] && { echo "Cleaning up host's CalcLog.1 ..."; sed -i '1,'"$(($(cat $HOME/CalcLog.logg.$HOSTNAME.1 | wc -l)-200))"'d' "$HOME/CalcLog.logg.$HOSTNAME.1"; }
+    [ -f "$HOME/CalcLog.logg.CalcLog.logg.$HOSTNAME.2" ] && [ $(wc -l < $HOME/CalcLog.logg.$HOSTNAME.2) -gt 500 ] && { echo "Cleaning up host's CalcLog.2 ..."; sed -i '1,'"$(($(cat $HOME/CalcLog.logg.$HOSTNAME.2 | wc -l)-200))"'d' "$HOME/CalcLog.logg.$HOSTNAME.2"; }
+
+################################ INSERTING FREQUENCY CHECKS AND INTERSPERSING WITH lutil DIVISORS #####################
+###################################### TO PREVENT VERY LONG FILENAMES IF SOME JOB FAILS ###############################
+
+   if [ -n "$(grep '^#' "$curinfile" | grep -i '[^!]*Opt[^ !]\+CalcAll')" ] || ( $shsaddle); then # must be tested!
+       cp "$curinfile" "$curinfile".bup
+       ($debugging) && echo "DEBUG: Inserting the lutil line for imaginary frequency tests..."
+       while [ -n "$(grep '^#' "$curinfile" | grep -i -e '[^!]* Opt[^ !]\+CalcAll' -e '[^!]* Freq')" ]; do
+           sed -n '1,/[^!]* \(Opt[^ !]\+CalcAll\|Freq\)/Ip' "$curinfile" >> /tmp/freqcheck.$HOSTNAME.tmp
+           sed -i '1,/[^!]* \(Opt[^ !]\+CalcAll\|Freq\)/Id' "$curinfile"
+           if [ -z "$(sed -n '1,/--Link1--/Ip' "$curinfile" | grep '^[ ]*!lutil')" ]; then
+               sed -n '1,/--Link1--/Ip' "$curinfile" >> /tmp/freqcheck.$HOSTNAME.tmp
+               sed -i '$i !lutil echo "Now the test for imaginary frequencies will be run..."' /tmp/freqcheck.$HOSTNAME.tmp
+               sed -i '$i\\' /tmp/freqcheck.$HOSTNAME.tmp # adds a blank line
+           else
+               sed -n '1,/--Link1--/Ip' "$curinfile" >> /tmp/freqcheck.$HOSTNAME.tmp
+           fi
+           sed -i '1,/--Link1--/Id' "$curinfile"
+       done
+       cat "$curinfile" >> /tmp/freqcheck.$HOSTNAME.tmp
+       [ $(cat /tmp/freqcheck.$HOSTNAME.tmp | wc -l) -gt 3 ] && { rm "$curinfile"; mv /tmp/freqcheck.$HOSTNAME.tmp "$curinfile"; }
+   fi
+
+   [ -z "$nintersperse" ] && nintersperse=10
+   njobs=$(grep -ce '--Link1--' "$curinfile") # actually 1 more
+   nlutils=$(grep -ce '^[ ]*!lutil' "$curinfile")
+   if [ "$njobs" -gt "$((nlutils*nintersperse+nintersperse))" ]; then
+         raminlutilchunk=$(cat "$curinfile")
+         curraminlutilchunk=""; raminlutilchunk2=""
+         if ($debugging); then
+             echo "--------------------------------------------------------------------------"
+             echo -e "File contains $njobs jobs and $nlutils lutil lines."
+             echo "--------------------------------------------------------------------------"
+         fi
+         lutlinessU=(1 $(echo "$raminlutilchunk" | grep -ne '^[ ]*!lutil' | cut -d ':' -f 1 | xargs) $(($(echo "$raminlutilchunk" | wc -l)+1)) ) # +1 because 1 will be subtracted
+         wplc=0
+         until [ $wplc -eq ${#lutlinessU[@]} ]; do
+            ($debugging) && echo "DEBUG: wplc=$wplc, lutlinessU[$wplc] is ${lutlinessU[$wplc]} and lutlinessU[$((wplc+1))] is ${lutlinessU[$((wplc+1))]}"
+            curraminlutilchunk=$(echo "$raminlutilchunk" | sed -n "${lutlinessU[$wplc]}"','"$((${lutlinessU[$((wplc+1))]}-1))"'p')
+            if [ "$(echo "$curraminlutilchunk" | grep -ce '--Link1--')" -gt $nintersperse ]; then
+                gawk 'BEGIN {n=0}; /--Link1--/{n++;if(n%'"$nintersperse"'==0){print "!lutil echo \"Splitting the file for convenience...\"\n"}}1' <(echo "$curraminlutilchunk") >> "${curinfile}.done_interspersed"
+# the for cycle alternative lasted HOURS, awk does it in SECONDS (also, the parent if was while then)
+           else
+               echo "$curraminlutilchunk" >> "${curinfile}.done_interspersed"
+           fi
+           wplc=$((wplc+1))
+        done
+        rm "${curinfile}" && mv "${curinfile}.done_interspersed" "${curinfile}"
+   fi
+   unset njobs nlutils
+
+   ( $modproc ) && (! $takeover) && p2go="" || p2go="o"
+   [ -n "$PBS_JOBID" ] && p2go="${p2go}d"
+   [ $numproc -ne 0 ] && p2go="${p2go}p $numproc"
+   [ -n "$p2go" ] && proc2gjf "-${p2go}" "$curinfile" || proc2gjf "$curinfile" # Requested RAM amounts updated anyway
+   ($debugging) && echo "DEBUG: command is: proc2gjf ${p2go} $curinfile"
+   echo ""
+   echo "----------------------------------------------------------------------------"
+   if ($takeover); then
+       echo "Takeover time: $(date)"
+       startime=$(tac "${gausfds[3]}" | grep -m 1 'Start time is: ' | sed 's/Start time is: //')
+       startime=$(date -d"${startime}" '+%s')
+   else
+       echo "Batch start time: $(date)" # to see when the calculation was started
+       [ "$OSTYPE" != "${OSTYPE/linux-gnu/}" ] && bstartime=$(date '+%s') || bstartime=$(date -r)
+   fi
+   echo "Hostname: $(uname -n)"
+   echo "Main input file is $firstcurinfile."; echo "Main output file is $curoutfile."
+   echo ""
+   echo "----------------------------------------------------------------------------"
+   echo "Environment variable values:"; echo "GAUSS_LNCHDIR : $GAUSS_LNCHDIR"; echo "GAUSS_SCRDIR : $GAUSS_SCRDIR"; echo "GAUSS_SPRSCRDIR : $GAUSS_SPRSCRDIR"; echo "GAUSS_SPRSCRDIR2 : $GAUSS_SPRSCRDIR2"; echo "GAUSS_EXEDIR : $GAUSS_EXEDIR"
+   echo "Used disk space is:"; du -hs $GAUSS_SPRSCRDIR $GAUSS_SCRDIR $GAUSS_LNCHDIR; echo "..."; [ -d "$GAUSS_SPRSCRDIR" ] && du -hs $GAUSS_SPRSCRDIR/*; echo "..."; [ -d "$GAUSS_SCRDIR" ] && du -hs $GAUSS_SCRDIR/*; echo "..."; [ -d "$GAUSS_SPRSCRDIR2" ] && du -hs $GAUSS_SPRSCRDIR2/*; echo "..."; for jki in $GAUSS_LNCHDIR/*; do [ -d "$jki" ] && du -hs "$jki"; echo "..."; done; echo "Free disk space is:"; df -h $GAUSS_SPRSCRDIR $GAUSS_SCRDIR $GAUSS_LNCHDIR $GAUSS_SPRSCRDIR2 > batutaibn.$HOSTNAME &
+   df_piddy=$!; sleep 7; disown $df_piddy; ( ps -p $df_piddy > /dev/null ) && kill -n 9 $df_piddy; [ $(wc -c < batutaibn.$HOSTNAME) -gt 0 ] && cat batutaibn.$HOSTNAME; rm batutaibn.$HOSTNAME
+   echo "----------------------------------------------------------------------------"
+   echo ""
+
+    tutelka=5
+    ( $watchoverchk ) && monitorchk "$1" &
+
+############################# debugging
+#   until [ $tutelka -eq 0 ]; do
+#       checkout $curinfile $curoutfile && tutelka=0 || exit 1
+#   done
+############################# end of debugging
+
+    totlutil=$(grep -c '^[ ]*!lutil' -o $curinfile); echo "Total number of utilities jobs to be launched is $totlutil."
+    ($takeover) && nrlutil=$nowlutil_to || nrlutil=0
+lnlutil=100500
+firstcuroutfile=${firstcurinfile%.gjf}.out
+( $takeover ) && savedgjfs=($(tac "${gausfds[3]}" | grep -m 1 'Currently the following intermediate GJF files will be saved:' | sed 's/Currently the following intermediate GJF files will be saved: //'))  || savedgjfs=()
+
+################################## STARTING TO SPLIT THE INPUT ALONG UTILITIES LINES #########################
+
+until [ $lnlutil -lt 1 ] || [ $(wc -c < $curinfile) -lt 2 ]; do
+    echo -e "\n----------------------------------------------------------------------------\n"
+    sed -i '$s/$/|/' $HOME/NowLog.$HOSTNAME
+    ($debugging) && echo "DEBUG: enter lnlutil cycle (nrlutil=$nrlutil)"
+    if (! $takeover); then
+        ((nrlutil++))
+        [ ! -f ${firstcurinfile%.gjf}_U$nrlutil.gjf ] && cp $curinfile ${firstcurinfile%.gjf}_U$nrlutil.gjf || echo "Warning! Next utility file already exists; the following behaviour will be undefined."
+        curinfile=${firstcurinfile%.gjf}_U$nrlutil.gjf
+        curoutfile=${firstcurinfile%.gjf}_U$nrlutil.out
+        echo "${curinfile%.gjf}: $totlutil | $(grep -c '^--Link1' -o $curinfile) | " >> $HOME/NowLog.$HOSTNAME
+    fi
+    lnlutil=$(grep -n '^[ ]*!lutil' -m 1 -o $curinfile | cut -d : -f 1); lutilcomm=""
+    [ -z $lnlutil ] && elnlutil=$(wc -l < $curinfile) || elnlutil=$lnlutil
+    felnlutil=$elnlutil
+    ($debugging) && echo "DEBUG: at this moment, utility line is is $elnlutil."
+        until [ -n "$(sed '1,'$elnlutil'd' $curinfile | head -1 | grep -i '\-\-Link1\-\-')" ] || [ $elnlutil -gt $(wc -l < $curinfile) ]; do ((elnlutil++)); done
+    ((elnlutil--))
+    if (! $takeover); then
+            sed -n $((elnlutil+1))',$p' $curinfile > ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf
+#   while [ -z "$(head -1 $curinfile | grep '%')" ]; do
+#       [ -n "$(head -1 $curinfile | grep 'lutil')" ] && head -1 $curinfile >> ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf
+#       sed -i '1 d' $curinfile
+#   done
+        sed -i $((elnlutil+1))',$d' $curinfile
+        sed -i 's/'${firstcuroutfile//\//\\\/}'/'$curoutfile'/' $curinfile # escapes all slashes (if present) in the out filename found in the infile
+        chmod a+r $curinfile # otherwise won't be read by Gaussian
+        [ -f $curoutfile ] && rm $curoutfile # checkout needs this file off; the user has been warned
+        echo "" >> $curinfile
+        ($debugging) && echo "DEBUG: two little prerequisities done"
+    fi
+    elnlutil=$felnlutil
+    ($debugging) && echo "DEBUG: next utility line is $lnlutil."
+    [ -z $lnlutil ] || lutilcomm=$(sed -n $elnlutil'p' $curinfile |sed 's/!lutil //')
+    ($debugging) && echo "DEBUG: next utility command is: $lutilcomm, found by line: sed -n $elnlutil'p' $curinfile | sed 's/!lutil //'."
+    echo "Present input file is $curinfile"
+    if [ $(wc -c < ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf) -gt 1 ] && (! $takeover); then
+        until [ -n "$(head -n 1 ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf | grep -e '%' -e '!lutil')" ] || [ $(wc -c < ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf) -eq 0 ]; do
+            sed '1 d' -i ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf
+        done
+    elif (! $takeover); then
+        : > ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf
+    fi
+    ($debugging) && echo "DEBUG: both the file to launch before and after the next utility run are now prepared"
+    ($debugging) && echo "DEBUG: entering iterlutil"
+        
+########################## CYCLE FOR ITERATIVE UTILITIES IS INITIALIZED ######################
+    iterlutil=1
+    if [ -n "$(echo $lutilcomm | grep 'iterlutil')" ]; then
+            if ($takeover); then
+                iter2lutil=$nowilutil_to
+            else
+                iter2lutil=1
+                mv $curinfile ${curinfile%.gjf}_G1.gjf
+                curinfile=${curinfile%.gjf}_G1.gjf
+                curoutfile=${curinfile%.gjf}.out
+            fi
+            echo ""
+            echo "iiiiiiiiiiiiiii Iterative utilities: iteration $iter2lutil started"
+    fi
+    while [ $iterlutil -gt 0 ]; do
+        lutilcomm=$(grep -m 1 '^[ ]*!lutil ' $curinfile |sed 's/!lutil //')
+        export lutilcomm
+
+
+########################################## LAUNCHING GAUSSIAN ################################
+        
+        until [ $tutelka -eq 0 ]; do # launches Gaussian; then replaces Gen/GenECP in .OUT file with the designation provided in the input file
+            outwasplanned=$curoutfile; inwasplanned=$curinfile
+            ($debugging) && echo "DEBUG: before checkout and test"
+            if (! $takeover); then
+                if [ ! -f $curoutfile ]; then
+                    echo ""
+                    echo "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ"
+                    echo "Start time is: $(date)"
+                    #startime=$(date +%s)
+                    SECONDS=0
+                    echo "File launched now is $curinfile; output going to $curoutfile..." 
+                    echo "--------------------------------------------------------------------------"
+                    echo "Jobs to be launched:"; sarakstu1 $curinfile
+                    echo "--------------------------------------------------------------------------"
+                else
+                    echo "Calculation after $curinfile complete, processing output in $curoutfile..."
+                    echo "End time is: $(date)"
+                    #entime=$(($(date +%s)-startime))
+                    [ $(echo ${BASH_VERSION:0:3} | tr -d '.') -ge 42 ] && slowpoke=( $(TZ=UTC0 printf '%(%_m months, %_d days, %_H hours, %_M minutes and %_S seconds)T' $SECONDS)) || slowpoke=( $(date -u '+%_m months, %_d days, %_H hours, %_M minutes and %_S seconds' -d@"$SECONDS"))
+                    slowpoke[0]=$((${slowpoke[0]}-1)); slowpoke[2]=$((${slowpoke[2]}-1))
+                    echo "Job took ${slowpoke[@]}."
+                    #echo "Job took $(date '+%_m months, %_d days %_H hours, %_M minutes and %_S seconds' -d@${entime})."
+                    echo "--------------------------------------------------------------------------"
+                fi
+            fi
+            if checkout "$curinfile" "$curoutfile" "$takeover"; then
+                    tutelka=0
+                    killall gaussbouncer && killall sleep
+                    [ -n "$(tac "$1" | sed -n '1,/--Link1/p' | grep 'iterlutil anfreqevery')" ] && sed -i '$s/$/I/' $HOME/NowLog.$HOSTNAME || sed -i '$s/$/+/' $HOME/NowLog.$HOSTNAME
+            else
+                sed -i '$s/$/X/' $HOME/NowLog.$HOSTNAME
+                mylittlecheck=$( [ "${curinfile%_fbk.gjf}" != "$curinfile" ] && ($takeover) && echo "true" || echo "false")
+                if (! $mylittlecheck); then
+                    if [ -n "$(grep -i 'Opt' $curinfile)" ]; then
+                        if ($takeover); then
+                            killer_pid=$(ps aux | grep '[g]aussbouncer' | gawk '{print $2}')
+                        else
+                            gaussbouncer $curoutfile &
+                            killer_pid="$!"
+                        fi
+                    fi
+                    iwtm=$(($(grep -ci '\-\-Link1\-\-' "$curinfile")+1))
+                    if ($takeover); then
+                        echo "As for now, takeover is implemented only for manually-terminated launchanews"
+                        while [ -n "$(ps aux | grep $USER | grep '[g]'"$gausch"'$')" ]; do
+                            sleep 300
+                        done
+                        #echo $$ > takeover.$HOSTNAME
+                        #kill -STOP $$
+                        #[ -n "$(tail -15 "${gausfds[3]}" | grep 'Error: segmentation violation')" ] && exitcodd=7 || exitcodd=0
+                        # the following will not work because wait can only wait for the children of current subshell
+                        #if [ -n "$(echo "$GAUSS_EXEDIR" | grep g09)" ]; then
+                        #    wait $(ps aux | grep '\s*[g]09' | gawk '{print $2}')
+                        #elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g16)" ]; then
+                        #    wait $(ps aux | grep '\s*[g]16' | gawk '{print $2}')
+                        #elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g03)" ]; then
+                        #    wait $(ps aux | grep '\s*[g]03' | gawk '{print $2}')
+                        #elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g98)" ]; then
+                        #    wait $(ps aux | grep '\s*[g]98' | gawk '{print $2}')
+                        #fi
+                        #exitcodd=$?
+                    else # standard launch
+                        sed -i '/^:::/s/_/\//g' $curinfile
+                        if ( $modproc ); then
+                            [ $numproc -eq 0 ] && proc2gjf $curinfile || proc2gjf -p $numproc $curinfile
+                        else
+                            proc2gjf -o $curinfile # Requested RAM amounts updated anyway
+                        fi
+                        if [ -n "$(echo "$GAUSS_EXEDIR" | grep g09)" ]; then
+                            g09 < $curinfile > $curoutfile && exitcodd=0 || exitcodd=7 # signals idea: unix.stackexchange.com/questions/103862
+                        elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g16)" ]; then
+                            g16 < $curinfile > $curoutfile && exitcodd=0 || exitcodd=7
+                        elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g03)" ]; then
+                            g03 < $curinfile > $curoutfile && exitcodd=0 || exitcodd=7
+                        elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g98)" ]; then
+                            g98 < $curinfile > $curoutfile && exitcodd=0 || exitcodd=7
+                        #    g09 < $curinfile > $curoutfile && ( exitcodd=0; [ -f takeover.$HOSTNAME ] && { xargs kill -CONT < takeover.$HOSTNAME; rm takeover.$HOSTNAME; }; ) || exitcodd=7 # signals idea: unix.stackexchange.com/questions/103862
+                        #elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g16)" ]; then
+                        #    g16 < $curinfile > $curoutfile && ( exitcodd=0; [ -f takeover.$HOSTNAME ] && { xargs kill -CONT < takeover.$HOSTNAME; rm takeover.$HOSTNAME; }; ) || exitcodd=7
+                        #elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g03)" ]; then
+                        #    g03 < $curinfile > $curoutfile && ( exitcodd=0; [ -f takeover.$HOSTNAME ] && { xargs kill -CONT < takeover.$HOSTNAME; rm takeover.$HOSTNAME; }; ) || exitcodd=7
+                        #elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g98)" ]; then
+                        #    g98 < $curinfile > $curoutfile && ( exitcodd=0; [ -f takeover.$HOSTNAME ] && { xargs kill -CONT < takeover.$HOSTNAME; rm takeover.$HOSTNAME; }; ) || exitcodd=7
+                        fi
+                    fi
+                    [ $exitcodd -gt 3 ] && { [ -z "$(echo ${savedgjfs[@]} | grep "$curinfile")" ] &&  savedgjfs=(${savedgjfs[@]} "$curinfile") || { echo "Something went wrong! This input file was already unsuccessfully launched..."; echo "Normal termination of nothing at $(date)" >> "$curoutfile"; }; }
+                    ihtm=$(grep -c 'Normal termination' "$curoutfile")
+                    echo "Completed $ihtm out of $iwtm jobs."
+                    echo "Currently the following intermediate GJF files will be saved: ${savedgjfs[@]}"
+                    sed -i '/GINC/,/ob cpu tim/!{/^ :::/,/---/s/\//_/g}' $curoutfile
+                    [ -n "$killer_pid" ] && kill $killer_pid && echo "Stopped cycling monitoring."
+                    if [ -z "$(grep 'Normal termination' $curoutfile)" ] && [ -f "${curinfile%.gjf}_fbk.gjf" ] && [ ! -f "${curinfile%.gjf}_fbk.out" ]; then
+                        fidelka=5
+                        while [ $fidelka -gt 0 ]; do
+                            if checkout "${curinfile%.gjf}_fbk.gjf" "${curinfile%.gjf}_fbk.out" "$takeover"; then
+                                fidelka=0
+                                killall gaussbouncer sleep 
+                            else
+                                if [ -n "$(grep -i 'Opt' $curinfile)" ]; then
+                                    if ($takeover); then
+                                        killer_pid3=$(ps aux | grep '[g]aussbouncer' | gawk '{print $2}' | sort | tail -1)
+                                    else
+                                        gaussbouncer $curoutfile &
+                                        killer_pid3="$!"
+                                    fi
+                                fi
+                                iwtm=$(($(grep -ci '\-\-Link1\-\-' "${curinfile%.gjf}_fbk.gjf")+1))
+                                echo "---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---"
+                                echo "Starting the fallback calculation (after the non-fallback one failed)..."
+                                echo "Start time is: $(date)"
+                                #startime=$(date +%s)
+                                SECONDS=0
+                                if [ -n "$(echo "$GAUSS_EXEDIR" | grep g09)" ]; then
+                                        g09 < "${curinfile%.gjf}_fbk.gjf" > "${curinfile%.gjf}_fbk.out" && exitcodd=0 || exitcodd=7
+                                elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g16)" ]; then
+                                        g16 < "${curinfile%.gjf}_fbk.gjf" > "${curinfile%.gjf}_fbk.out" && exitcodd=0 || exitcodd=7
+                                elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g03)" ]; then
+                                        g03 < "${curinfile%.gjf}_fbk.gjf" > "${curinfile%.gjf}_fbk.out" && exitcodd=0 || exitcodd=7
+                                elif [ -n "$(echo "$GAUSS_EXEDIR" | grep g98)" ]; then
+                                        g98 < "${curinfile%.gjf}_fbk.gjf" > "${curinfile%.gjf}_fbk.out" && exitcodd=0 || exitcodd=7
+                                fi
+                                [ $exitcodd -gt 3 ] && savedgjfs=(${savedgjfs[@]} "$curinfile")
+                                ihtm=$(grep -c 'Normal termination' "${curinfile%.gjf}_fbk.out")
+                                echo "Completed $ihtm out of $iwtm jobs."
+                                echo "Currently the following intermediate GJF files will be saved: ${savedgjfs[@]}"
+                                sed -i '/GINC/,/ob cpu tim/!{/^ :::/,/---/s/\//_/g}' "${curinfile%.gjf}_fbk.out"
+                                kill $killer_pid3 2>/dev/null && echo "Stopped cycling monitoring."
+                                echo "Calculation after ${curinfile%.gjf}_fbk.gjf complete, processing output in ${curinfile%.gjf}_fbk.out..."
+                                echo "End time is: $(date)"
+                                [ $(echo ${BASH_VERSION:0:3} | tr -d '.') -ge 42 ] && slowpoke=( $(TZ=UTC0 printf '%(%_m months, %_d days, %_H hours, %_M minutes and %_S seconds)T' $SECONDS)) || slowpoke=( $(date -u '+%_m months, %_d days, %_H hours, %_M minutes and %_S seconds' -d@"$SECONDS"))
+                                slowpoke[0]=$((${slowpoke[0]}-1)); slowpoke[2]=$((${slowpoke[2]}-1))
+                                echo "Job took ${slowpoke[@]}."
+                                #entime=$(($(date +%s)-startime))
+                                #echo "Job took $(date '+%_m months, %_d days %_H hours, %_M minutes and %_S seconds' -d@${entime})."
+                                echo "---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---"
+                            fi
+                        done
+                    fi
+                else # mylittlecheck (can be executed only in the case of takeover)
+                    fidelka=5
+                    while [ $fidelka -gt 0 ]; do
+                        if checkout "$curinfile" "$curoutfile" "$takeover"; then
+                            fidelka=0
+                            killall gaussbouncer && killall sleep && killall monitram
+                        else
+                            if [ -n "$(grep -i 'Opt' $curinfile)" ]; then
+                                if ($takeover); then
+                                    killer_pid2=$(ps aux | grep '[g]aussbouncer' | gawk '{print $2}' | sort | tail -1)
+                                else
+                                    gaussbouncer $curoutfile &
+                                    killer_pid2="$!"
+                                fi
+                            fi
+                            iwtm=$(($(grep -ci '\-\-Link1\-\-' "$curinfile")+1))
+                            #echo $$ > takeover.$HOSTNAME
+                            #kill -STOP $$
+                            echo "Currently only taking over manually terminated launchanew is possible (I hope)..."
+                            while [ -n "$(ps aux | grep $USER | grep '[g]'"$gausch"'$')" ]; do
+                                sleep 300
+                            done
+                            [ -n "$(tail -25 "${gausfds[3]}" | grep 'Error: segmentation violation')" ] && exitcodd=7 || exitcodd=0
+                            ihtm=$(grep -c 'Normal termination' "$curoutfile")
+                            echo "Calculation after ${curinfile%.gjf}_fbk.gjf complete, processing output in ${curinfile%.gjf}_fbk.out..."
+                            echo "End time is: $(date)"
+                            #entime=$(($(date +%s)-startime))
+                            #echo "Job took $(date '+%_m months, %_d days %_H hours, %_M minutes and %_S seconds' -d@${entime})."
+                            [ $(echo ${BASH_VERSION:0:3} | tr -d '.') -ge 42 ] && slowpoke=( $(TZ=UTC0 printf '%(%_m months, %_d days, %_H hours, %_M minutes and %_S seconds)T' $SECONDS)) || slowpoke=( $(date -u '+%_m months, %_d days, %_H hours, %_M minutes and %_S seconds' -d@"$SECONDS"))
+                            slowpoke[0]=$((${slowpoke[0]}-1)); slowpoke[2]=$((${slowpoke[2]}-1))
+                            echo "Job took ${slowpoke[@]}."
+                        echo "---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---f---"
+                            echo "Completed $ihtm out of $iwtm jobs."
+                            sed -i '/GINC/,/ob cpu tim/!{/^ :::/,/---/s/\//_/g}' "${curinfile%.gjf}_fbk.out"
+                            kill $killer_pid2 2>/dev/null && echo "Stopped cycling monitoring."
+                        fi
+                        takeover=false
+                        [ -f "takeover.$HOSTNAME" ] && rm takeover.$HOSTNAME
+                    done
+                    curinfile="${curinfile%_fbk.gjf}.gjf"
+                    curoutfile="${curoutfile%_fbk.out}.out"
+                fi # mylittlecheck
+                takeover=false
+                unset mylittlecheck
+            fi
+            ($debugging) && echo "DEBUG: properties of file from just finished job:     $(ls -lv ${outwasplanned%.out}*.out)"
+            ($debugging) && [ $tutelka -gt 0 ] && echo "DEBUG: up to start next cycle (will continue until evaluation)"
+            takeover=false
+            [ -f "takeover.$HOSTNAME" ] && rm takeover.$HOSTNAME
+            [ $tutelka -eq 0 ] && break
+        done
+
+########################## REPLACING Gen BASIS SET WITH ONE SPECIFIED IN A SPEC. COMMENT IN GJF #################
+
+        echo "--------------------------------------------------------------------------"
+        lnwasplanned=1
+        for kwinterfinter in ${outwasplanned%.out}*.out; do
+            raminfilewasplanned=$(cat "${kwinterfinter%.out}.gjf")
+            ramoutfilewasplanned=$(cat "${kwinterfinter}")
+            curraminfilewasplanned=""; curramoutfilewasplanned=""; ramoutfilewasplanned2=""
+            willwedelete=$(grep -v '###' "$kwinterfinter" | grep -c -E '^ #[TNPtnp]* .*[/][Gg]en')
+            [ -n "$(echo "$willwedelete" | sed 's@[0-9]@@g')" ] && willwedelete=0
+            if ($debugging); then
+                echo "DEBUG: GenBS substitution within file named: $kwinterfinter"
+                [ $willwedelete -gt 0 ] && echo "DEBUG: and we will replace the initial file" || echo "DEBUG: we will not replace the initial file"
+                echo "--------------------------------------------------------------------------"
+                echo -e "Lines using different Gen keywords:\n"
+                { echo "$ramoutfilewasplanned"; echo "$ramoutfilewasplanned2"; } | grep -v '###' | grep -c -E '^ #[TNPtnp]* .*[/][Gg]en'
+                echo "--------------------------------------------------------------------------"
+            fi
+            differentGenBSes=$(echo "$raminfilewasplanned" | grep -ne '==GENBASISSET==')
+# below: lines at which file splits in different BSes
+            differentGenBSesU=(0 $(echo "$differentGenBSes" | tr ' ' '#' | tr ':' ' ' | tac | uniq -f 1 | cut -d ' ' -f 1 | tac | xargs) $(echo "$raminfilewasplanned" | wc -l) ) # tac because I need the last one
+            differentGenBSesOut="0
+            $(echo "$ramoutfilewasplanned" | grep -n -e 'Normal termination' -e 'Error termination' | cut -d ':' -f 1)
+            $(echo "$ramoutfilewasplanned" | wc -l)" # 0 because 1 will be added
+            wplc=0
+            new_differentGenBSesOut=""
+            until [ $wplc -eq $((${#differentGenBSesU[@]}-1)) ]; do
+                ($debugging) && echo "DEBUG: about to run this command: sed -n $((${differentGenBSesU[$wplc]}+1))"','"${differentGenBSesU[$((wplc+1))]}"'p'
+                njjbb=$(echo "$raminfilewasplanned" | sed -n "$((${differentGenBSesU[$wplc]}+1))"','"${differentGenBSesU[$((wplc+1))]}"'p' | grep -ce '%NProcShared')
+                new_differentGenBSesOut=$(echo "$new_differentGenBSesOut"; echo "$differentGenBSesOut" | head -1)
+                differentGenBSesOut=$(echo "$differentGenBSesOut" | sed -n '2,$p')
+                if [ $njjbb -gt 1 ]; then
+                    for jjbbb in $(seq 2 $njjbb); do
+                        new_differentGenBSesOut=$(echo "$new_differentGenBSesOut"; echo "$differentGenBSesOut" | head -1 | sed 's@^@#@')
+                        differentGenBSesOut=$(echo "$differentGenBSesOut" | sed -n '2,$p')
+                    done
+                fi
+                ($debugging) && echo "DEBUG: after this iteration, line number set for OUT file is $(echo "$new_differentGenBSesOut" | xargs)"
+                wplc=$((wplc+1))
+            done
+            new_differentGenBSesOut=$(echo "$new_differentGenBSesOut" | sed '/#/d')
+            differentGenBSesOut=( ${new_differentGenBSesOut[@]} $(wc -l < "${kwinterfinter}") )
+            ($debugging) && echo "DEBUG: GJF file number array is:" && echo ${differentGenBSesU[@]} && echo "DEBUG: OUT file number array is:" && echo ${differentGenBSesOut[@]}
+            wplc=0
+            until [ $wplc -eq $((${#differentGenBSesU[@]}-1)) ]; do
+                curraminfilewasplanned=$(echo "$raminfilewasplanned" | sed -n "$((${differentGenBSesU[$wplc]}+1))"','"${differentGenBSesU[$((wplc+1))]}"'p')
+                ($debugging) && echo -e "DEBUG: the current GJF fragment is $(echo "$curraminfilewasplanned" | wc -l) lines long and its last part is:\n$(echo "$curraminfilewasplanned" | tail -20)"
+                curramoutfilewasplanned=$(echo "$ramoutfilewasplanned" | sed -n "$((${differentGenBSesOut[$wplc]}+1))"','"${differentGenBSesOut[$((wplc+1))]}"'p')
+                ($debugging) && echo -e "DEBUG: the current OUT fragment is $(echo "$curramoutfilewasplanned" | wc -l) lines long and its last part is:\n$(echo "$curramoutfilewasplanned" | tail -20)"
+                wasplanned=$(echo "$curraminfilewasplanned" | tail -1 | grep '==GENBASISSET=='  | sed 's/\!==GENBASISSET==//;s/ //g')
+                ($debugging) && echo "DEBUG: now substituting the following Gen BS: $wasplanned"
+                [ -n "$wasplanned" ] && curramoutfilewasplanned=$(echo "$curramoutfilewasplanned" | sed '/^ #.*Gen[ECP]*/I{/###/!{s/Gen[ECP]*/('${wasplanned//;/\\\;}')/I}}' ) || break
+                ramoutfilewasplanned2=$(echo "$ramoutfilewasplanned2"; echo "$curramoutfilewasplanned")
+                wplc=$((wplc+1))
+            done
+            echo "$ramoutfilewasplanned2" > "${kwinterfinter}.new"
+            [ ${willwedelete} -gt 0 ] && [ $(wc -l <  "${kwinterfinter}.new") -gt 2 ] && rm "${kwinterfinter}" && mv "${kwinterfinter}.new" "${kwinterfinter}"
+            ($debugging) && echo "DEBUG: external iteration of the lnwasplanned cycle ended."
+        done
+
+#################################### PRE-PROCESSING GAUSSIAN OUTPUT ######################
+            
+        newest_out=$(ls -lt ${firstcurinfile%.gjf}*out | head -1 | rev | cut -d ' ' -f 1 | rev)
+            ($debugging) && echo "DEBUG: Newest output file is $newest_out, while planned-to-be output file is $outwasplanned"
+        # ($debugging) && echo "DEBUG: line since which lfna works is $(( $(wc -l < $newest_out)-$(tac $newest_out | grep -v '###' | grep -n -m 1 '^ #' | cut -d ':' -f 1) ))"
+        [ -z "$( grep '^ #' "$newest_out")" ] || [ $(tac $newest_out | sed -n '1,/Entering Link 1/p' | sed -n '/GINC\|UNPC/,/Entering Link 1/p' | tac | sed -n '/^ #/,/^ ------/p'| sed '$d' | sed ':a;N;s/[\r]*\n //g;ba' | grep -c -i -e ' Opt' -e 'ExternalIteration') -eq 0 ] && ( $rmdurakov ) && doloiduraka $newest_out # if there are no 'Normal terminations' or a functional lacked abilities for a compound job, the output will be deleted; not smth You want until the file is checked by checkout(), though...
+        ($debugging) && ( $rmdurakov ) && echo "DEBUG: currently cleansed .out file properties:     $(ls -l $newest_out)"
+        ($debugging) && echo "DEBUG: outwasplanned properties:     $(ls -l $outwasplanned)"
+
+########################## LAUNCHING ITERATIVE UTILITIES #############################
+
+        if [ -z "$(echo $lutilcomm | grep 'iterlutil')" ]; then
+                iterlutil=0
+        else
+            ($debugging) && echo "DEBUG: enter iterative utility cycle ($lutilcomm)"
+                ((iter2lutil++))
+                lutilcommi="$(echo "$lutilcomm" | sed 's/^iterlutil //')"
+                starpcurinfile=${curinfile%.gjf}
+                tac $curinfile | sed -n '/!lutil/,/--Link1--/p' | sed '/--Link1--/d' | tac > ${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                if [ -n "$(sed -n '/^#/p' ${starpcurinfile%_G*}_G"$iter2lutil".gjf | grep -i ' Opt')" ] && [ -z "$(sed -n '/^#/p' ${starpcurinfile%_G*}_G"$iter2lutil".gjf | grep -i ' Geom=Check')" ]; then
+                    sed -i '/^#/s@^[^!]\+@& Geom=Check@' ${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                    sed -n '1,/#/p' ${starpcurinfile%_G*}_G"$iter2lutil".gjf >> tmp.ilugeomfile.foo.$HOSTNAME
+                    sed -n '1,/--Link1--/I { /#/ {:utka; n; p; /#/b utka; n; N; N; p} }' ${starpcurinfile%_G*}_G"$iter2lutil".gjf >> tmp.ilugeomfile.foo.$HOSTNAME; >> tmp.ilugeomfile.foo.$HOSTNAME
+#                   b=blank line, c=charge and m-city: b;t;b;c;     geom is skipped                        ; and the rest of the file printed
+                    ($debugging) && echo "DEBUG: Contents of tmp file are:" && { cat tmp.ilugeomfile.foo.$HOSTNAME | sed 's/^/--> /'; }
+                    ($debugging) && echo "DEBUG: We are going to add this:" && sed -n '1,/--Link1--/Ip' ${starpcurinfile%_G*}_G"$iter2lutil".gjf | sed -n '/#/ {:putka; n; /#/b putka;n;N;N;:utka n; s/\t/ /;/^[ ]*[A-Z][a-z]\?\([ ]\+[-]*[0-9]\+\.[0-9]\+\)\{3\}/b utka; :shutka p; n; /--Link1--/I!b shutka }'
+                    sed -n '1,/--Link1--/Ip' ${starpcurinfile%_G*}_G"$iter2lutil".gjf | sed -n '/#/ {:putka; n; /#/b putka;n;N;N;:utka n; s/\t/ /;/^[ ]*[A-Z][a-z]\?\([ ]\+[-]*[0-9]\+\.[0-9]\+\)\{3\}/b utka; :shutka p; n; /--Link1--/I!b shutka }' >> tmp.ilugeomfile.foo.$HOSTNAME
+                    rm ${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                    mv tmp.ilugeomfile.foo.$HOSTNAME ${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                fi
+                if [ -z "$(sed -n '/^#/p' ${starpcurinfile%_G*}_G"$iter2lutil".gjf | grep -i ' Guess[^ ]Read')" ]; then
+                    sed -i '/^#/{s@ Guess[^ ]\+@@;s@^[^!]\+@& Guess=Read@}' ${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                fi
+                echo -e "\niiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"
+                echo "Executing the following iterative utility command:"; echo $lutilcommi
+                eval $lutilcommi $((iter2lutil-1)) $curoutfile ${starpcurinfile%_G*}_G"$iter2lutil".gjf && errlui=false || errlui=true
+                echo "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"
+                echo -e "iiiiiiiiiiiiiii Iterative utilities: iteration $((iter2lutil-1)) ended\n"
+                if ($errlui); then 
+                    curinfile=${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                    curoutfile=${curinfile%gjf}out
+                    tutelka=3
+                else
+                    mv ${starpcurinfile%_G*}_G"$iter2lutil".gjf ilmask.${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                    mv ${starpcurinfile%_G*}_G1.gjf ilmask.${starpcurinfile%_G*}_G1.gjf
+                    rm ${starpcurinfile%_G*}_G*.gjf
+                    mv ilmask.${starpcurinfile%_G*}_G"$iter2lutil".gjf ${starpcurinfile%_G*}_G"$iter2lutil".gjf
+                    mv ilmask.${starpcurinfile%_G*}_G1.gjf ${starpcurinfile%_G*}_G1.gjf
+                    tutelka=0
+                    echo -e "\niiiiiiiiiiiiiii Iterative utilities: completed"
+                fi
+                echo -e "\niiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii\n"
+                ($debugging) && echo "DEBUG: exit iterative utility step (iteration mark is $iterlutil)"
+                ($debugging) && echo "DEBUG: tutelka is $tutelka"
+                [ $tutelka -eq 0 ] && break
+        fi
+    done
+
+############################# LAUNCHING ONE-SHOT UTILITIES ############################
+
+    if [ -n "${lutilcomm// /}" ] && [ -z "$(echo $lutilcomm | grep 'iterlutil')" ]; then
+        ($debugging) && echo "DEBUG: inwasplanned is now:     $inwasplanned, while curinfile is now    $curinfile"
+        while [ -z "$(echo $lutilcomm | grep -i 'Link1')" ] && [ $elnlutil -le $(wc -l < $inwasplanned) ]; do
+        if [ -n "$lutilcomm" ]; then
+                        echo ""
+            echo "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU"
+            echo "Executing the following utility command:"; echo $lutilcomm
+            eval $lutilcomm
+            ($debugging) && echo "DEBUG: elnlutil was $elnlutil"
+            ((elnlutil++)); lutilcomm=$(sed -n $elnlutil's/!lutil //' $inwasplanned | tr -s '')
+            ($debugging) && echo "DEBUG: elnlutil is $elnlutil, file size is $(wc -l < $inwasplanned) lines, and lutil command is now $lutilcomm"
+            echo -e "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU\n"
+        else
+            break
+        fi
+        done
+    fi
+    echo "End/restart time: $(date)"; tutelka=5
+    echo -e "\nJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ\n"
+    ($debugging) && echo "DEBUG: next filename, checked by wc, is ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf, with result $(wc -c < ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf)."
+    curinfile=${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf
+#   [ $(wc -c < $curinfile) -lt 3 ] && break
+    if ($debugging); then
+        [ $elnlutil -lt 1 ] || [ $(wc -c < $curinfile) -lt 2 ] && echo 'DEBUG: do will exit now' || echo 'DEBUG: do will continue'
+    fi
+    [ -z "$lnlutil" ] && lnlutil=$elnlutil
+done
+sed -i '$s/$/ |/' $HOME/NowLog.$HOSTNAME
+
+########################### REMOVING EMPTY FILES, ARCHIVING RESULTS ################################
+
+echo "Batch end time: $(date)" # to see when the calculation was started
+[ -n "$(echo "$OSTYPE" | grep "linux-gnu")" ] && bentime=$(($(date +%s)-bstartime)) || bentime=$(($(date -r)-bstartime))
+[ $(echo ${BASH_VERSION:0:3} | tr -d '.') -ge 42 ] && slowpoke=( $(TZ=UTC0 printf '%(%_m months, %_d days, %_H hours, %_M minutes and %_S seconds)T' $bentime)) || slowpoke=( $(date -u '+%_m months, %_d days, %_H hours, %_M minutes and %_S seconds' -d@"$bentime"))
+slowpoke[0]=$((${slowpoke[0]}-1)); slowpoke[2]=$((${slowpoke[2]}-1))
+echo "Calculations took ${slowpoke[@]}."
+echo -e "\n----------------------------------------------------------------------------\n"
+($debugging) && echo "Size of file ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf is $(wc -c < ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf) bytes."
+[ $(wc -c < ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf) -eq 0 ] && rm ${firstcurinfile%.gjf}_U$((1+$nrlutil)).gjf
+[ -f zebra.getepsilon ] && rm zebra.getepsilon
+[ -f bufa_launch ] && rm bufa_launch
+($debugging) && echo "DEBUG: exited cycles, about to launch cannotzero (rmzero=$rmzero)"
+if ($rmzero); then
+   echo "----------------------------------------------------------------------------"
+   echo "Removing jobs that started with 0000_000..."
+   cannotzero ${firstcurinfile%.gjf}*out
+   echo "----------------------------------------------------------------------------"
+fi
+
+unix2dos ${firstcurinfile%.gjf}_U*
+for blaumann in ${firstcurinfile%.gjf}_U*out; do sed -i '/GINC/,/ob cpu tim/!{/^ :::/,/---/s/\//_/g}' $blaumann; done
+if ($notarr); then
+    cp ${firstcurinfile%.gjf}_U*.out "$iniladir/"
+else
+    [ 0 -lt $(ls -l ${firstcurinfile%.gjf}_U*.out | wc -l) ] && tar -czf ${firstcurinfile%.gjf}.tgz ${firstcurinfile%.gjf}_U*.out && { echo "OUT files archived to ${firstcurinfile%.gjf}.tgz ."; rm ${firstcurinfile%.gjf}_U*.out; } || echo "OUT files are not archived -- check them in the $GAUSS_LNCHDIR ; this behaviour is highly unexpected, so You should be concerned."
+fi
+for blaumann in ${firstcurinfile%.gjf}_U*gjf; do
+    [ $(cat "$blaumann" | wc -l) -lt 2 ] && rm $blaumann
+    [ -z "$(echo "${savedgjfs[@]}" | grep "$blaumann")" ] && rm "$blaumann" || mv "$blaumann" "$iniladir/"
+done
+unset listchk; getfchklist $firstcurinfile "end"; listchk=( $(for yure in "${presentchks[@]}"; do echo $yure; done | sort -u | sed 's/^ //' | sed 's/ $//' | sed 's/\/.*\///') ); debugging=true
+listchk2=""
+for wense in ${listchk[@]}; do [ -f "$wense" ] && listchk2="$listchk2 $wense"; done
+($debugging) && { echo "DEBUG: list of formatted checkpoints:"; echo ${listchk2[@]}; }
+[ -n "${listchk2[1]}" ] && tar -czf ${firstcurinfile%.gjf}_fchks.tgz ${listchk2[@]//.chk/.fchk} && { echo "FCHK files archived to ${firstcurinfile%.gjf}_fchks.tgz ."; rm fort.7 ${listchk2[@]} ${listchk[@]//fchk/chk}; } || { [ -n "$(ls *.fch *.fchk 2>/dev/null)" ] && tar czf ${firstcurinfile%.gjf}_fchks.tgz *.fch *.fchk && echo "FCHK files were not in the list but are now archived." || echo "No FCHK files were found, hence none of such are archived."; }
+echo -e "\n========================\nAll utilities jobs done (if present). Have a nice day!\n========================\n"
+[ -f "${firstcurinfile%.gjf}.tgz" ] && mv "${firstcurinfile%.gjf}.tgz" "$iniladir/"; [ -f "${firstcurinfile%.gjf}_fchks.tgz" ] && mv "${firstcurinfile%.gjf}_fchks.tgz" "$iniladir/"
+( ! $preservechk ) && [ -n "$(ls -v *.chk)" ] && rm *.chk
+[ -n "$(ls -v *addinput*)" ] && rm *addinput*
+[ -f "${firstcurinfile%.gjf}_failed.gjf" ] && [ "$iniladir" != "$GAUSS_LNCHDIR" ] && mv "${GAUSS_LNCHDIR}/${firstcurinfile%.gjf}_failed.gjf" "${iniladir}/${firstcurinfile%.gjf}_failed.gjf"
+[ "$iniladir" != "$GAUSS_LNCHDIR" ] && { [ -f "${iniladir}/${firstcurinfile}" ] && rm "${GAUSS_LNCHDIR}/${firstcurinfile}" || mv "${GAUSS_LNCHDIR}/${firstcurinfile}" "${iniladir}/${firstcurinfile}"; }  
+[ -z "$(diff "${GAUSS_LNCHDIR}/${firstcurinfile}.bup" "${iniladir}/${firstcurinfile}")" ] && rm "${GAUSS_LNCHDIR}/${firstcurinfile}.bup"
+
+cd "$iniladir" && rmdir "$GAUSS_LNCHDIR"
+( $ramparam ) && killall monitram && echo "RAM monitoring stopped."
+#killall sos_save
+cp "${GAUSS_SCRDIR}/log/$(basename "$myoldlogg")" "$myoldlogg"
+( $nodalek ) && rm $HOME/antidalek.$(uname -n)
+cp "${GAUSS_SCRDIR}/log/$(basename "$myoldlogg")" "$myoldlogg" >> $HOME/CalcLogg.$HOSTNAME 2>&1
+exec 1>>"$myoldlogg"
+exec 2>&1
+rm "${GAUSS_SCRDIR}/log/$(basename "$myoldlogg")"
+killall monitorchk
+killall monitlog
+kill $(ps aux | grep $USER | grep ${0##*/} | gawk '{print $2}' | grep -v "$$" | xargs)  ## can anyone explain me why do I need this? And I do need this, but on CentOS only (not on Debian).
+
+exit $exitcodd # because by default there is no antidalek
+
+# End and glory to God.
+

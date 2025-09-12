@@ -1,0 +1,252 @@
+#!/bin/bash
+koef=10; intkoef=0; d2ekoef=0; batchmode=false; dummy=false; helpp=false; usehome=false; destroy=false
+workrwf=0; workint=0; workd2e=0
+pubrwf=0; pubint=0; pubd2e=0
+work2_rwf=0; work2_int=0; work2_d2e=0
+
+if [ "$(uname -n)" == "lasc1" ]; then
+    echo "Cannot run on the entrance node! First, connect to the node on which You are going to calculate!"
+    exit 150
+fi
+
+while getopts ":c:i:D:nxbdh" myopts; do
+    case $myopts in
+	c) koef=$OPTARG ;;
+	i) intkoef=$OPTARG ;;
+	D) d2ekoef=$OPTARG ;;
+	b) batchmode=true ;;
+	n) usehome=true ;;
+	x) destroy=true ;;
+	d) dummy=true ;;
+	h) helpp=true ;;
+    esac
+done
+shift "$((OPTIND-1))"
+($helpp) && echo "Usage: $0 [-bdh] [-c KOEF] [-i KOEF] input_file
+	-b : batch mode (no informative output)
+	-n : add also files in the launching directory (usually it is on the network, so this is not advisable)
+	-x : remove %RWF, %INT, %D2E and %NoSave lines from the file and exit
+	-d : dummy mode: only tell what would be done but not do anything with the file
+	-c KOEF : coefficient to multiply avail. space in scratch directories by; must be in percents or tens of percents
+	-i KOEF : coefficient of the same range to amplify space assigned for integrals storage (decreases space for RWF)
+	-D KOEF : coefficient of the same range to amplify space assigned for integral second derivatives storage (decreases space for RWF)
+	-h : display this help." && exit 0
+sed -i '/%RWF=/d;/%INT=/d;/%D2E=/d;/%NoSave/d' "$1"
+if ($destroy); then
+    exit 0
+fi
+([ $intkoef -gt 10 ] || [ $d2ekoef -gt 10 ]) && koef=100
+(! $batchmode ) && echo "Insurance coeffcient is $koef, integral coefficient is $intkoef."
+[ $koef -gt 10 ] && dkoef=100 || dkoef=10
+# assuming there is also third (emergency) place for RWF, in /home
+gscr=${GAUSS_SCRDIR#\/}; [ -d "$GAUSS_SPRSCRDIR" ] && gspr=${GAUSS_SPRSCRDIR#\/}; [ -d "$GAUSS_SPRSCRDIR2" ] && gspr2=${GAUSS_SPRSCRDIR2#\/}
+allwork=$(df -hm | grep "\b${gscr%%\/*}\b" | tr -s ' ' | cut -d ' ' -f 4)
+echo "DEBUG: allwork is $allwork"
+[ -z "$allwork" ] && allwork=$(df -hm | grep '\b\/$' | tr -s ' ' | cut -d ' ' -f 4)
+[ -z "$allwork" ] && allwork=$(df -hm | grep ' \/$' | tr -s ' ' | cut -d ' ' -f 4)
+allwork=$((allwork/1024))
+(! $batchmode ) && echo "Available at $GAUSS_SCRDIR is $allwork GB."
+allwork=${allwork%.*}
+workrwf=$((allwork*(koef-intkoef)/dkoef-4))
+workint=$((1+allwork*intkoef/dkoef))
+workd2e=$((1+allwork*d2ekoef/dkoef))
+if [ -d "$GAUSS_SPRSCRDIR" ]; then
+    allpublic=$(df -hm | grep "\b${gspr%%\/*}\b" | tr -s ' ' | cut -d ' ' -f 4)
+    #[ -z "$allpublic" ] && allpublic=$(df -hm | grep '\/$' | tr -s ' ' | cut -d ' ' -f 4)
+    allpublic=$((allpublic/1024))
+    if [ -z "$allpublic" ]; then
+        allpublic=0
+    else
+        allpublic=${allpublic%.*}
+        pubint=$((1+allpublic*intkoef/dkoef))
+        pubrwf=$((allpublic*(koef-intkoef)/dkoef-4))
+        pubd2e=$((1+allwork*d2ekoef/dkoef))
+    fi
+    (! $batchmode ) && echo "Available at $GAUSS_SPRSCRDIR is $allpublic GB."
+fi
+if [ -d "$GAUSS_SPRSCRDIR2" ] && [ "$GAUSS_SPRSCRDIR2" != "$GAUSS_SPRSCRDIR" ]; then
+    allwork2=$(df -hm | grep "\b${gspr2%%\/*}\b" | tr -s ' ' | cut -d ' ' -f 4)
+    allwork2=$((allwork2/1024))
+    (! $batchmode ) && echo "Available at $GAUSS_SPRSCRDIR2 is $allwork2 GB."
+    allwork2=${allwork2%.*}
+    work2_rwf=$((allwork2*(koef-intkoef)/dkoef-4))
+    work2_int=$((1+allwork2*intkoef/dkoef)) # workint=$((allwork/11)); pubint=$((allpublic/11))
+    work2_d2e=$((1+allwork2*d2ekoef/dkoef)) # workint=$((allwork/11)); pubint=$((allpublic/11))
+fi
+if (! $batchmode ); then
+    echo -n "At $GAUSS_SCRDIR, $workrwf GB will be used for RWF"
+    [ -d "$GAUSS_SPRSCRDIR" ] && echo -n ", while at $GAUSS_SPRSCRDIR $pubrwf GB"
+    [ -d "$GAUSS_SPRSCRDIR2" ] && echo -n "(at $GAUSS_SPRSCRDIR2 $work2_rwf GB)"
+    echo "."
+    echo -n "At $GAUSS_SCRDIR, $workint GB will be used for integrals"
+    [ -d "$GAUSS_SPRSCRDIR" ] && echo -n ", while at $GAUSS_SPRSCRDIR $pubint GB"
+    [ -d "$GAUSS_SPRSCRDIR2" ] && echo -n "(at $GAUSS_SPRSCRDIR2 $work2_int GB)"
+    echo "."
+    echo -n "At $GAUSS_SCRDIR, $workd2e GB will be used for integrals"
+    [ -d "$GAUSS_SPRSCRDIR" ] && echo -n ", while at $GAUSS_SPRSCRDIR $pubd2e GB"
+    [ -d "$GAUSS_SPRSCRDIR2" ] && echo -n "(at $GAUSS_SPRSCRDIR2 $work2_d2e GB)"
+    echo "."
+fi
+
+isworkrwf=$(grep -m 1 -i '%RWF' $1 | cut -d ',' -f 2)
+isworkint=$(grep -m 1 -i '%Int' $1 | cut -d ',' -f 2)
+isworkd2e=$(grep -m 1 -i '%D2E' $1 | cut -d ',' -f 2)
+echo "Tagad ir $isworkrwf"
+if [ -z "$isworkrwf" ]; then
+    sed -i '/NProcShared/I a %NoSave' $1
+    if [ -d "$GAUSS_SPRSCRDIR2" ]; then
+        if ($usehome); then
+            sed -i '/NProcShared/I a %D2E='"$GAUSS_SCRDIR/${1%.gjf}"'a1.d2e,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.d2e,1GB,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a4.d2e,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.d2e' $1
+            sed -i '/NProcShared/I a %INT='"$GAUSS_SCRDIR/${1%.gjf}"'a1.int,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.int,1GB,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a4.int,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.int' $1
+            sed -i '/NProcShared/I a %RWF='"$GAUSS_SCRDIR/${1%.gjf}"'a1.rwf,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.rwf,1GB,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a4.rwf,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.rwf' $1
+        else
+            sed -i '/NProcShared/I a %D2E='"$GAUSS_SCRDIR/${1%.gjf}"'a1.d2e,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.d2e,1GB,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a4.d2e,1GB' $1
+            sed -i '/NProcShared/I a %INT='"$GAUSS_SCRDIR/${1%.gjf}"'a1.int,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.int,1GB,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a4.int,1GB' $1
+            sed -i '/NProcShared/I a %RWF='"$GAUSS_SCRDIR/${1%.gjf}"'a1.rwf,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.rwf,1GB,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a4.rwf,1GB' $1
+        fi
+    elif [ -d "$GAUSS_SPRSCRDIR" ]; then
+        if ($usehome); then
+            sed -i '/NProcShared/I a %D2E='"$GAUSS_SCRDIR/${1%.gjf}"'a1.d2e,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.d2e,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.d2e' $1
+            sed -i '/NProcShared/I a %INT='"$GAUSS_SCRDIR/${1%.gjf}"'a1.int,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.int,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.int' $1
+            sed -i '/NProcShared/I a %RWF='"$GAUSS_SCRDIR/${1%.gjf}"'a1.rwf,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.rwf,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.rwf' $1
+        else
+            sed -i '/NProcShared/I a %D2E='"$GAUSS_SCRDIR/${1%.gjf}"'a1.d2e,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.d2e,1GB' $1
+            sed -i '/NProcShared/I a %INT='"$GAUSS_SCRDIR/${1%.gjf}"'a1.int,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.int,1GB' $1
+            sed -i '/NProcShared/I a %RWF='"$GAUSS_SCRDIR/${1%.gjf}"'a1.rwf,1GB,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.rwf,1GB' $1
+        fi
+    else
+        if ($usehome); then
+            sed -i '/NProcShared/I a %D2E='"$GAUSS_SCRDIR/${1%.gjf}"'a1.d2e,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.d2e' $1
+            sed -i '/NProcShared/I a %INT='"$GAUSS_SCRDIR/${1%.gjf}"'a1.int,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.int' $1
+            sed -i '/NProcShared/I a %RWF='"$GAUSS_SCRDIR/${1%.gjf}"'a1.rwf,1GB,'"$GAUSS_LNCHDIR/${1%.gjf}"'a3.rwf' $1
+        else
+            sed -i '/NProcShared/I a %D2E='"$GAUSS_SCRDIR/${1%.gjf}"'a1.d2e,1GB' $1
+            sed -i '/NProcShared/I a %INT='"$GAUSS_SCRDIR/${1%.gjf}"'a1.int,1GB' $1
+            sed -i '/NProcShared/I a %RWF='"$GAUSS_SCRDIR/${1%.gjf}"'a1.rwf,1GB' $1
+        fi
+    fi
+    isworkrwf="1GB"
+    isworkint="1GB"
+    isworkd2e="1GB"
+elif [ -d "$GAUSS_SPRSCRDIR" ] && [ -z "$(grep -i -m 1 '^%RWF=.*'"$GAUSS_SPRSCRDIR" "$1")" ]; then
+    sed -i '/^%RWF=/s@\(,'"${GAUSS_SCRDIR}/"'.*.rwf,[0-9]\+[GM][BW]\)@\1,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.rwf,1GB@I' "$1"
+    sed -i '/^%INT=/s@\(,'"${GAUSS_SCRDIR}/"'.*.int,[0-9]\+[GM][BW]\)@\1,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.int,1GB@I' "$1"
+    sed -i '/^%D2E=/s@\(,'"${GAUSS_SCRDIR}/"'.*.d2e,[0-9]\+[GM][BW]\)@\1,'"$GAUSS_SPRSCRDIR/${1%.gjf}"'a2.d2e,1GB@I' "$1"
+elif [ -d "$GAUSS_SPRSCRDIR2" ] && [ "$GAUSS_SPRSCRDIR2" != "$GAUSS_SPRSCRDIR" ] && [ -z "$(grep -i -m 1 '^%RWF=.*'"$GAUSS_SPRSCRDIR2" "$1")" ]; then
+    sed -i '/^%RWF=/s@\(,'"${GAUSS_SPRSCRDIR}/"'.*.rwf,[0-9]\+[GM][BW]\)@\1,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a3.rwf,1GB@I' "$1"
+    sed -i '/^%INT=/s@\(,'"${GAUSS_SPRSCRDIR}/"'.*.int,[0-9]\+[GM][BW]\)@\1,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a3.int,1GB@I' "$1"
+    sed -i '/^%D2E=/s@\(,'"${GAUSS_SPRSCRDIR}/"'.*.d2e,[0-9]\+[GM][BW]\)@\1,'"$GAUSS_SPRSCRDIR2/${1%.gjf}"'a3.d2e,1GB@I' "$1"
+fi
+
+if [ -d "$GAUSS_SPRSCRDIR" ]; then
+    ispubrwf=$(grep -m 1 -i '%RWF' $1 | cut -d ',' -f 4)
+    ispubint=$(grep -m 1 -i '%Int' $1 | cut -d ',' -f 4)
+    ispubd2e=$(grep -m 1 -i '%D2E' $1 | cut -d ',' -f 4)
+    if [ -d "$GAUSS_SPRSCRDIR2" ]; then
+        ishomrwf=$(grep -m 1 -i '%RWF' $1 | cut -d ',' -f 8)
+        ishomint=$(grep -m 1 -i '%Int' $1 | cut -d ',' -f 8)
+        ishomd2e=$(grep -m 1 -i '%D2E' $1 | cut -d ',' -f 8)
+        iswrk2rwf=$(grep -m 1 -i '%RWF' $1 | cut -d ',' -f 6)
+        iswrk2int=$(grep -m 1 -i '%Int' $1 | cut -d ',' -f 6)
+        iswrk2d2e=$(grep -m 1 -i '%D2E' $1 | cut -d ',' -f 6)
+    else
+        ishomrwf=$(grep -m 1 -i '%RWF' $1 | cut -d ',' -f 6)
+        ishomint=$(grep -m 1 -i '%Int' $1 | cut -d ',' -f 6)
+        ishomd2e=$(grep -m 1 -i '%D2E' $1 | cut -d ',' -f 6)
+        sed -i '/%RWF=\|%INT=\|%D2E=/s@'"$GAUSS_SPRSCRDIR2"'.*/@/@' "$1"
+    fi
+else
+    ishomrwf=$(grep -m 1 -i '%RWF' $1 | cut -d ',' -f 4)
+    ishomint=$(grep -m 1 -i '%Int' $1 | cut -d ',' -f 4)
+    ishomd2e=$(grep -m 1 -i '%D2E' $1 | cut -d ',' -f 4)
+    sed -i '/%RWF=\|%INT=\|%D2E=/s@'"$GAUSS_SPRSCRDIR"'.*/@/@' "$1"
+fi
+[ -z "$isworkrwf" ] && isworkrwf=','
+[ -z "$isworkint" ] && isworkint=','
+[ -z "$isworkd2e" ] && isworkd2e=','
+[ -z "$ispubrwf" ] && ispubrwf=','
+[ -z "$ispubint" ] && ispubint=','
+[ -z "$ispubd2e" ] && ispubd2e=','
+[ -z "$ishomrwf" ] && ishomrwf=','
+[ -z "$ishomint" ] && ishomint=','
+[ -z "$ishomd2e" ] && iswhomd2e=','
+[ -z "$iswrk2rwf" ] && iswrk2rwf=','
+[ -z "$iswrk2int" ] && iswrk2int=','
+[ -z "$iswrk2d2e" ] && iswrk2d2e=','
+
+ismaxdisk="$(grep -m 1 -o -E '[mM]ax[dD]isk=[^ ]*' $1 | cut -d '=' -f 2)"
+if [ -z "$ismaxdisk" ]; then
+    sed -i '/^#[[:alpha:]]*/s/^#[[:alpha:]]*/& MaxDisk=6GB/' $1
+    ismaxdisk="6GB"
+fi
+#echo -e "Current:\t$isworkrwf\n\t$isworkint\n\t$isworkd2e\n\t$ispubrwf\n\t$ispubint\n\t$ishomrwf\n\t$ishomd2e\n\t$ismaxdisk"
+#echo -e "Current:\t$workrwf\n\t$workint\n\t$workd2e\n\t$pubrwf\n\t$pubint"
+#[ -d "$GAUSS_SPRSCRDIR2" ] && maxdisk=$(($workrwf+$workint+$workd2e+$pubrwf+$pubint+$pubd2e+$work2_rwf+$work2_int+$work2_d2e)) || maxdisk=$(($workrwf+$workint+$workd2e+$pubrwf+$pubint+$pubd2e))
+maxdisk=$(($workrwf+$workint+$workd2e+$pubrwf+$pubint+$pubd2e+$work2_rwf+$work2_int+$work2_d2e))
+(! $batchmode ) && echo "Old MaxDisk was $ismaxdisk, new is $maxdisk GB."
+
+if (! $dummy ); then
+    if [ -d "$GAUSS_SPRSCRDIR2" ] && [ "$GAUSS_SPRSCRDIR2" != "$GAUSS_SPRSCRDIR" ] ; then
+        if ($usehome); then
+            sed -i '/%RWF/{s|'"$isworkrwf"','"$GAUSS_SPRSCRDIR"'|'"$workrwf"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubrwf"','"$GAUSS_SPRSCRDIR2"'|'"$pubrwf"'GB,'"$GAUSS_SPRSCRDIR2"'|;s|'"$iswrk2rwf"',/hom|'"$work2_rwf"'GB,/hom|}' $1
+            sed -i '/%Int/{s|'"$isworkint"','"$GAUSS_SPRSCRDIR"'|'"$workint"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubint"','"$GAUSS_SPRSCRDIR2"'|'"$pubint"'GB,'"$GAUSS_SPRSCRDIR2"'|;s|'"$iswrk2int"',/hom|'"$work2_int"'GB,/hom|}' $1
+            sed -i '/%D2E/{s|'"$isworkd2e"','"$GAUSS_SPRSCRDIR"'|'"$workd2e"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubd2e"','"$GAUSS_SPRSCRDIR2"'|'"$pubd2e"'GB,'"$GAUSS_SPRSCRDIR2"'|;s|'"$iswrk2d2e"',/hom|'"$work2_d2e"'GB,/hom|}' $1
+        else
+            sed -i '/%RWF/{s|'"$isworkrwf"','"$GAUSS_SPRSCRDIR"'|'"$workrwf"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubrwf"','"$GAUSS_SPRSCRDIR2"'|'"$pubrwf"'GB,'"$GAUSS_SPRSCRDIR2"'|;s|'"$iswrk2rwf"'$|'"$work2_rwf"'GB|}' $1
+            sed -i '/%Int/{s|'"$isworkint"','"$GAUSS_SPRSCRDIR"'|'"$workint"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubint"','"$GAUSS_SPRSCRDIR2"'|'"$pubint"'GB,'"$GAUSS_SPRSCRDIR2"'|;s|'"$iswrk2int"'$|'"$work2_int"'GB|}' $1
+            sed -i '/%D2E/{s|'"$isworkd2e"','"$GAUSS_SPRSCRDIR"'|'"$workd2e"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubd2e"','"$GAUSS_SPRSCRDIR2"'|'"$pubd2e"'GB,'"$GAUSS_SPRSCRDIR2"'|;s|'"$iswrk2d2e"'$|'"$work2_d2e"'GB|}' $1
+        fi
+    elif [ -d "$GAUSS_SPRSCRDIR" ]; then
+        if ($usehome); then
+            sed -i '/%RWF/{s|'"$isworkrwf"','"$GAUSS_SPRSCRDIR"'|'"$workrwf"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubrwf"',/hom|'"$pubrwf"'GB,/hom|}' $1
+            sed -i '/%Int/{s|'"$isworkint"','"$GAUSS_SPRSCRDIR"'|'"$workint"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubint"',/hom|'"$pubint"'GB,/hom|}' $1
+            sed -i '/%D2E/{s|'"$isworkd2e"','"$GAUSS_SPRSCRDIR"'|'"$workd2e"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubd2e"',/hom|'"$pubd2e"'GB,/hom|}' $1
+        else
+            sed -i '/%RWF/{s|'"$isworkrwf"','"$GAUSS_SPRSCRDIR"'|'"$workrwf"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubrwf"'$|'"$pubrwf"'GB|}' $1
+            sed -i '/%Int/{s|'"$isworkint"','"$GAUSS_SPRSCRDIR"'|'"$workint"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubint"'$|'"$pubint"'GB|}' $1
+            sed -i '/%D2E/{s|'"$isworkd2e"','"$GAUSS_SPRSCRDIR"'|'"$workd2e"'GB,'"$GAUSS_SPRSCRDIR"'|;s|'"$ispubd2e"'$|'"$pubd2e"'GB|}' $1
+        fi
+    else
+        if ($usehome); then
+            sed -i '/%RWF/{s|'"$isworkrwf"',/hom|'"$workrwf"'GB,/hom|}' $1
+            sed -i '/%Int/{s|'"$isworkint"',/hom|'"$workint"'GB,/hom|}' $1
+            sed -i '/%D2E/{s|'"$isworkd2e"',/hom|'"$workd2e"'GB,/hom|}' $1
+        else
+            sed -i '/%RWF/{s|'"$isworkrwf"'$|'"$workrwf"'GB|}' $1
+            sed -i '/%Int/{s|'"$isworkint"'$|'"$workint"'GB|}' $1
+            sed -i '/%D2E/{s|'"$isworkd2e"'$|'"$workd2e"'GB|}' $1
+        fi
+    fi
+    sed -i '/MaxDisk=/s/'"$ismaxdisk"'/'"$maxdisk"'GB/' $1
+    if [ "$allpublic" -le 4 ]; then
+        sed -i '/%RWF/I{s|[,]*'"$GAUSS_SPRSCRDIR"'[^,]*,'"$pubrwf"'GB||I}' $1
+        sed -i '/%Int/I{s|[,]*'"$GAUSS_SPRSCRDIR"'[^,]*,'"$pubint"'GB||I}' $1
+        sed -i '/%D2E/I{s|[,]*'"$GAUSS_SPRSCRDIR"'[^,]*,'"$pubd2e"'GB||I}' $1
+    fi
+    if [ "$allwork" -le 4 ]; then
+        sed -i '/%RWF/I{s|[,]*'"$GAUSS_SCRDIR"'[^,]*,'"$workrwf"'GB||I}' $1
+        sed -i '/%Int/I{s|[,]*'"$GAUSS_SCRDIR"'[^,]*,'"$workint"'GB||I}' $1
+        sed -i '/%D2E/I{s|[,]*'"$GAUSS_SCRDIR"'[^,]*,'"$workd2e"'GB||I}' $1
+    fi
+fi
+if [ "$workrwf" -le 0 ]; then
+    sed -i '/%RWF/I{s|'"$GAUSS_SCRDIR"'/[[:alnum:]_]\+.rwf,-[0-9]\+GB,*||}' $1
+    sed -i '/%Int/I{s|'"$GAUSS_SCRDIR"'/[[:alnum:]_]\+.int,-*[0-9]\+GB,*||}' $1
+    sed -i '/%D2E/I{s|'"$GAUSS_SCRDIR"'/[[:alnum:]_]\+.d2e,-*[0-9]\+GB,*||}' $1
+    sed -i '/#/{s| MaxDisk=\S\+||}' $1
+fi
+if [ "$pubrwf" -le 0 ]; then
+    sed -i '/%RWF/I{s|'"$GAUSS_SPRSCRDIR"'/[[:alnum:]_]\+.rwf,-[0-9]\+GB,*||}' $1
+    sed -i '/%Int/I{s|'"$GAUSS_SPRSCRDIR"'/[[:alnum:]_]\+.int,-*[0-9]\+GB,*||}' $1
+    sed -i '/%D2E/I{s|'"$GAUSS_SPRSCRDIR"'/[[:alnum:]_]\+.d2e,-*[0-9]\+GB,*||}' $1
+    sed -i '/#/{s| MaxDisk=\S\+||}' $1
+fi
+if [ "$work2_rwf" -le 0 ]; then
+    sed -i '/%RWF/I{s|'"$GAUSS_SPRSCRDIR2"'/[[:alnum:]_]\+.rwf,-[0-9]\+GB,*||}' $1
+    sed -i '/%Int/I{s|'"$GAUSS_SPRSCRDIR2"'/[[:alnum:]_]\+.int,-*[0-9]\+GB,*||}' $1
+    sed -i '/%D2E/I{s|'"$GAUSS_SPRSCRDIR2"'/[[:alnum:]_]\+.d2e,-*[0-9]\+GB,*||}' $1
+    sed -i '/#/{s| MaxDisk=\S\+||}' $1
+fi
+sed -i 's@=,@=@g;/=$/d' $1
+( $batchmode ) && echo -e "$isworkrwf $isworkint $isworkd2e $ispubrwf $ispubint $ispubd2e $ishomrwf $ishomint $ishomd2e $ismaxdisk $workrwf $workint $workd2e $pubrwf $pubint $pubd2e $homrwf $homint $homd2e $maxdisk $iswrk2rwf $iswrk2int $iswrk2d2e $work2_rwf $work2_int $work2_d2e"
+

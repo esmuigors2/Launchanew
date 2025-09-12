@@ -1,0 +1,108 @@
+#!/bin/bash
+
+tenacious() { # inserts missing NProcShare/Mem Link0 directives
+    njobs=$(grep -ic '\-\-Link1\-\-' "$1")
+    for cryy in $(seq 0 $njobs); do
+        ramfik=$(sed -n '1,/--Link1--/Ip' "$1")
+        numl0d=$(echo "$ramfik" | grep -n '^%[A-Za-z0-9]' | head -1 | cut -d ':' -f 1)
+        if [ -z "$numl0d" ]; then
+            numl0d=$(echo "$ramfik" | grep -n '^#[NPTntp ]\+' | head -1 | cut -d ':' -f 1)
+            ramfik=$(echo "$ramfik" | sed "$numl0d"'i \
+')
+            ramfik=$(echo "$ramfik" | sed "$numl0d"'i %NProcShared=1')
+            ramfik=$(echo "$ramfik" | sed "$numl0d"'i %Mem=25MB')
+        elif [ -n "$(echo "$ramfik" | grep -i 'nprocshared')" ] && [ -z "$(echo "$ramfik" | grep -i '^%mem')" ]; then
+            ramfik=$(echo "$ramfik" | sed "$numl0d"'i %Mem=25MB')
+        elif [ -n "$(echo "$ramfik" | grep -i '^%mem')" ] && [ -z "$(echo "$ramfik" | grep -i 'nprocshared')" ]; then
+            ramfik=$(echo "$ramfik" | sed "$numl0d"'i %NProcShared=1')
+        elif [ -z "$(echo "$ramfik" | grep -i '^%mem')" ] && [ -z "$(echo "$ramfik" | grep -i 'nprocshared')" ]; then
+            ramfik=$(echo "$ramfik" | sed "$numl0d"'i %NProcShared=1')
+            ramfik=$(echo "$ramfik" | sed "$numl0d"'i %Mem=25MB')
+        fi
+        echo "$ramfik" >> "${1}.proc2g.$HOSTNAME"
+        sed -i '1,/--Link1--/Id' "$1"
+    done
+    mv "${1}.proc2g.$HOSTNAME" "$1"
+}
+
+memkoef='0.87' # 875 crashed
+allproc=$(grep -c 'processor' /proc/cpuinfo)
+helps=false; tellmeall=false; checkall=false; memonly=false; decronly=false
+
+while getopts "hop:m:atd" zeno; do
+    case $zeno in
+        h ) helps=true ;;
+        p ) allproc="$OPTARG";;
+        m ) memkoef="$OPTARG";;
+        t ) checkall=true ;;
+        o ) memonly=true ;;
+        d ) decronly=true ;;
+        a ) tellmeall=true;;
+	\?) echo "Some options were not recognized." ;; # for cases of "invented" options
+	:) echo "I do not know how much proc You wanted..." ;;
+    esac
+done
+shift "$((OPTIND-1))"
+
+if ($helps); then
+	echo -e "$0: get number of cores and RAM available for Gaussian computations.
+$(tput bold)Options:$(tput sgr0)
+\t-p N: set number of cores to N (integer)
+\t-m N: set memory ratio to use to N (float)
+\t-t N: add NProcShared and Mem directives to all jobs, even if they are not present. This is the default if no directives are found.
+\t-o  : leave the number of cores intact but adjust the memory (handy if another process is being run on the same node)
+\t-d  : only decreasing the memory amount available (handy if run on cluster with queue system)
+\t-a  : print all memory sizes and numbers of CPU cores that were present in the file
+$(tput bold)Usage:$(tput sgr0)
+\t$0 input_file.inp [options] [percentage_of_RAM_to_use_(def.: 0.75) [ nr_of_cores_to_use ] ]
+"
+	exit 0
+fi
+
+sed -i 's/nprocshared/NProcShared/;s/%mem/%Mem/' $1
+
+[ -z "$2" ] || memkoef="$2"
+
+[ -z "$3" ] || allproc="${3%.*}"
+
+allmem=$(free -m | grep 'Mem:' | xargs | cut -d ' ' -f 4)    # in MB!
+jaunais_tirmem=$(free -m | grep 'available')
+[ -n "$jaunais_tirmem" ] && tirmem=$(free -m | grep 'Mem:' | xargs | cut -d ' ' -f 7) || tirmem=$(free -m | grep -e '-/+ buff' | xargs | cut -d ' ' -f 4)
+[ -n "$tirmem" ] && allmem=$tirmem
+allmem="$(python -c 'print('"$allmem"'*'"$memkoef"')')"
+allmem="${allmem%.*}"
+
+ismems=$(grep -i '^%Mem' $1 | cut -d '=' -f 2 | sort -u | xargs)
+isprocs=$(grep -i '^%NProcShared' $1 | cut -d '=' -f 2 | sort -u | xargs)
+($checkall) && tenacious "$1"
+if [ -z "$ismems" ] || [ -z "$isprocs" ]; then
+    if [ -n "$ismems" ]; then
+        sed -i '/^%Mem/Ia %NProcShared=1' "$1"
+        isprocs="1"
+    elif [ -n "$isprocs" ]; then
+        sed -i '/^%NProcShared/Ia %Mem=25MB' "$1"
+        ismems="25MB"
+    else
+        tenacious "$1"
+    fi
+fi
+($memonly) && allproc="(${isprocs[@]})"
+ismemsa=${ismems// /}; isprocsa=${isprocs// /}
+if ($tellmeall); then
+    echo -e "Old Mem was ($ismems), new is $allmem MB.\nOld NProcShared was ($isprocs), new is $allproc."
+else
+    if [ $((${#ismems}-${#ismemsa})) -le 4 ] || [ $((${#isprocs}-${#isprocsa})) -le 4 ]; then
+        echo -e "Old Mem was ($ismems), new is $allmem MB.\nOld NProcShared was ($isprocs), new is $allproc."
+    elif [ $((${#ismems}-${#ismemsa})) -gt 4 ]; then
+        [ $((${#isprocs}-${#isprocsa})) -gt 4 ] && echo -e "Old Mem was ${ismems// */} and many more, new is $allmem MB.\nOld NProcShared was ${isprocs// */} and many more, new is $allproc." || echo -e "Old Mem was ${ismems// */} and many more, new is $allmem MB.\nOld NProcShared was ($isprocs) and many more, new is $allproc."
+    else
+        echo -e "Old Mem was ($ismems), new is $allmem MB.\nOld NProcShared was ${isprocs// */} and many more, new is $allproc."
+    fi
+fi
+(! $memonly) && for isproc in $isprocs; do sed -i '/%NProcShared/Is|='"$isproc"'$|='"$allproc"'|' $1; done
+if ($decronly); then
+    for ismem in $ismems; do [ "${ismem%MB}" -gt "$allmem" ] && sed -i '/%Mem/Is|='"$ismem"'$|='"$allmem"'MB|' $1; done
+else
+    for ismem in $ismems; do sed -i '/%Mem/Is|='"$ismem"'$|='"$allmem"'MB|' $1; done
+fi
+
