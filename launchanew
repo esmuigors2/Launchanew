@@ -150,7 +150,7 @@ fi
 
 mygorgeouspid=$$
 
-. $HOME/bin/liblaunchanew.2026.10.26 || { echo "LIBRARY NOT FOUND OR NOT LOADABLE!!!!! EXITING!"; exit 2; }
+. $HOME/bin/liblaunchanew.2026.10.26 || { echo "LIBRARY NOT FOUND OR NOT LOADABLE!!!!! EXITING!"; exit 1; }
 
 ###################### FUNCTION TO DISPLAY REQUIREMENTS/DEPENDENCIES FOR THE SCRIPT ###############################
 
@@ -328,15 +328,15 @@ export GAUSS_LNCHDIR
         whatineedfunc; exit 0
     elif [ -f $curoutfile ] && (! $takeover); then
         echo -e "Please archive or delete old files with specified names first.\nNames causing problem:  $curoutfile"
-        exit 1
+        exit 2
     elif [ ! -f $curinfile ]; then
         echo "No input file! Something went wrong..."
-        exit 1
+        exit 3
     elif [ -n "$(grep '^#' "$curinfile" | grep '/Gen')" ] && [ -z "$(grep '==GENBASISSET==' "$curinfile")" ]; then
         echo "Please put the name of Your Gen basis/-es into the file as comments."
         echo "You can use:"
         echo 'sed -i '"'"'/\*\*\*\*$/{N;/[[:alnum:]]\+/!s@\*\*\*\*@&\n!==GENBASISSET== YOUR_BASIS_NAME @}'"'"' '"$curinfile"
-        exit 1
+        exit 4
     fi
 
 ############################ REPORTING STATUS OF GLOBAL-SCOPE VARIABLES ############################
