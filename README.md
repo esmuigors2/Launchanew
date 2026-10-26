@@ -52,10 +52,10 @@ Input files are encouraged (**but not always required**) to have a title section
 - Job results are extracted automatically and stored in spreadsheet files (one per compound). `job_group_name` is the sheet name inside such a file.
 - `multistep_job_name` is the name of a compound job, which is useful for grouping jobs in a batch file. For example, `Ionization` has three steps (neutral, cation, anion), and `ExcitedStateAbsorption` has a single point that stores the slow component of the reaction field, followed by the TD calculation.
 - `job_step_in_multistep_job` is an integer from 1 to 9.
-- For `launchanew` to work fully, you only need to set `multistep_job_name` and `job_step_in_multistep_job` in each title section (see `-c` and `-d` for why). Example: `::: a b c d e 1`
+- **For `launchanew` to work fully**, you only need to set `multistep_job_name` and `job_step_in_multistep_job` in each title section (see `-c` and `-d` for why). Example: `::: a b c d e 1`
 - The first step of a geometry optimization is recognized by matching `GeometryOptimization 1`. Edit the script if you use other names.
 - Jobs that should not be archived (fragmented or other sophisticated guesses, jobs producing natural orbitals, etc.) can be marked by setting both geometry names to `0000_000 0000_000` (see `-z`).
-- If the route section uses `/Gen`, the input must contain a `!==GENBASISSET== YOUR_BASIS_NAME` comment line. The script prints a `sed` one-liner to add it.
+- If the route section uses `/Gen`, the input must contain a `!==GENBASISSET== YOUR_BASIS_NAME` comment line. The script prints an error and a `sed` one-liner to add it.
 
 ### `!lutil` commands (optional)
 
