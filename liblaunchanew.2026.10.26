@@ -1,12 +1,19 @@
 #!/bin/bash
 # I hope this will be useful...
-echo "Using liblaunchanew library version of August 12th, 2025"
+echo "Using liblaunchanew library version of October 26th, 2026"
 echo "(Actually using ${BASH_SOURCE[0]}, but, You know, my head is as full of holes as DFT)"
-#   Changes: added copyfirst() to add a repeated first job; this can be used to alter the first job in a non-production way (e.g., SCF=VShift) and use it as a better guess
-#       Also, tried to reorganize options for solving linear search problems in SCF, adding DM and the aforementioned VShift
-#       Also, corrected a stupid mistake in getridofdirt (it never launched, thinking there is gaussian running, but it was grep, which in this case was harder to remember to filter out...)
+#   Changes: rewritten the imgsolver completely, it is now also available as a standalone application
+#       Also, 
 
 #   Change archive for the last 6 months:
+#   2026.09.22: fighting the imgsolver problems (correction on 27.09.2026, added \n to bobieks definition sub fxn)
+#   2026.09.02: corrected a bug which introduced double spacers around the title line upon every error correction (causing Gaussian to crash)
+#   2026.06.24: implemented (?) CHK file import for the job (non-destructive archive extraction into the working directory); freshened up the help a bit
+#   2026.06.19: implemented handling multiple route lines and comments at the end of route lines (not yet comments interspersing multiple route lines); multiple little improvements, i.e. when improving initial guess in scfsolver
+#   2026.06.18a: possibly caught the error which prevented successfully preparing a new input file with altered geometry; prevented adding automatic CalcAll and Stable=Opt for excited state optimizations
+#   2026.06.18: added the (probably working) case to detect if the job was manually terminated; rearranged some solving (cancel the job if many unsuccessful attempts were made, to allow colleagues to work)
+#   2026.06.09: tried to solve the issue with imgsolver which could not actually get the geometries and add them to the input properly; added a new "solution" for geometry problems": computing force constants with PBE0/6-31G(d) and reading them in to use, if our own method is too expensive for the constants; tuned a bit SCF solving...
+#   2025.08.12: added copyfirst() to add a repeated first job; this can be used to alter the first job in a non-production way (e.g., SCF=VShift) and use it as a better guess; tried to reorganize options for solving linear search problems in SCF, adding DM and the aforementioned VShift; corrected a stupid mistake in getridofdirt (it never launched, thinking there is gaussian running, but it was grep, which in this case was harder to remember to filter out...)
 #   2022.05.13: getridofdirt now exits when there is another Gaussian running (will only work if all Gaussians are same major releases)
 #   2022.05.02: updated help function
 #   2022.03.03: tried to adapt for Opt Freq in a single route line
@@ -114,47 +121,79 @@ echo "(Actually using ${BASH_SOURCE[0]}, but, You know, my head is as full of ho
 # checkout()
 # copyfirst()
 
+# IMPORTANT MACROS USED IN SOLVERS
+# bobchesh allows to read the whole Route section and
+# chesh part also does reposition the comments to the last line; it helps greatly in carrying out additions and substitutions in the Route
+# 
+bobiek="/#/{:bob;N;/\n *[#][^\n]\+$/bbob;" # You must close Your }
+bobieks="/#/{:bob;N;/\n *[#][^\n]\+$/bbob;s@^\([^!\n]\+\)" # You must close Your [s@]@@ and }, and use \1 in the replacement part
+# Old bobchesh, which moves the comments, is now in the main code; here, in the library, only bob part stays and should not be used too much, as it would do all sorts of bad things...
+# bobchesh=":bob;N;/\n *[#][^\n]\+$/bbob;:chesh;s@\(\n#[^!]\+\)\([!][^\n]\+\)\n\(.*\)$@\1\n\3 \2\n@;/\n#[^!]\+[!][^\n]\+\n *#[^ \n]\+/bchesh;s@\n *#@\n#@g;s@\n *[!]@\n!@;"
+# not working: tried to handle full comment lines within the Route section as well:
+# :irecat;s@\(\n *[!][^\n]\+\)\n\( *[^ \n]\+[^\n]*\)\n *\$@\2\n\1\n@;/\n *[!][^\n]\+\n.*\n *\$/birecat;
+# when reimplementing, change [#] in the bob part to [#!]
+
 helpings(){
-    echo; echo "Script is intended to restart failed jobs and launch additional utilities. Every failure is reported to stdout and to $HOME/CalcLog.logg.$HOSTNAME file. Failed job inputs are copied to file /path/to/inputfile_failed.gjf. At the end all .out and .fchk files are compressed to /path/to/inputfile.tgz and to /path/to/inputfile_fchks.tgz, respectively. If the output file contains no 'Normal termination' lines, by default IT WILL BE DELETED after launchanew finishes; this can be overridden by specifying -u option."; echo
-    echo "And congratulations are printed."
+    echo; echo "Script is intended to restart failed jobs and launch additional utilities. Every failure is reported to stdout and to $HOME/CalcLog.logg.$HOSTNAME file. Failed job inputs are copied to file /path/to/inputfile_failed.gjf. At the end all .out and .fchk files are compressed to /path/to/inputfile.tgz and to /path/to/inputfile_fchks.tgz, respectively."
+    echo "And congratulations are printed."; echo
     echo "If the name of input file is not specified, that of input file is used, replacing '.gjf' with '.out'."; echo
     echo "ATTENTION! New defaults starting from version 5.8.6.0."; echo
-    echo -e "\e[38;5;40m-t\e[0m or \e[38;5;40m--takeover\e[0m:\tscript will try to take over the Gaussian calculation currently run on the machine; You need not to kill the old launchanew process (but may do so) and You MUST NOT redirect the input of this script to any logg file -- it will append to the old one, with takeover time recorded. The input file argument is also ignored."
-    echo
+    echo -e "FORCEFUL TERMINATION: if You want to terminate the job forcefully to. e.g., restart the optimization from selected geometry, You need to:\n\t1) modify the next full sub-GJF file and start it with the tasks You want to launch instead of the currently running one (e.g., if aa_U2_1_2_5.gjf is running, You need to modify file aa_U3.gjf);\n\t2) delete all contents of the currently used sub-GJF file (in our example, that would be aa_U2_1_2_5.gjf);\n\t3) kill the active Gaussian link (see top or ps aux | grep $USER).\nThe script will then tidy up after the kill and start Your desired jobs."; echo
+# Takeover mechanisms are based on some unsafe shenanigans in bash. I am going to phase them out, as the mechanism still does not work!
+    # echo -e "\e[38;5;40m-t\e[0m or \e[38;5;40m--takeover\e[0m:\tscript will try to take over the Gaussian calculation currently run on the machine; You need not to kill the old launchanew process (but may do so) and You MUST NOT redirect the input of this script to any logg file -- it will append to the old one, with takeover time recorded. The input file argument is also ignored."
     echo "Whether to delete scratch files in $GAUSS_SCRDIR directory or not to do that:"
-    echo -e "   \e[38;5;40mno option\e[0m\tdo this once before start and also after every misrun of Gaussian"
+    echo -e "   \e[38;5;40mno option\e[0m\t\tdo this once before start and also after every misrun of Gaussian"
     echo -e "   \e[38;5;40m-r\e[0m or \e[38;5;40m--remove\e[0m:\tdo NOT do this once in the beginning"
-    echo -e "   \e[38;5;40m-a\e[0m or \e[38;5;40m--noalltimeneat\e[0m:\tSUPPRESS DOING SO after every misrun of Gaussian."
+    echo -e "   \e[38;5;40m-a\e[0m or \e[38;5;40m--noalltimeneat\e[0m:\n\t\tSUPPRESS DOING SO after every misrun of Gaussian."
     echo; echo "Behaviour regarding jobs using checkpoint files that were modified by failed jobs:"
-    echo -e "   \e[38;5;40mno option\e[0m:\tall jobs until the end of compound job will be omitted. A compound job contains multiple steps which are neede to obtain complete results."
-    echo -e "   \e[38;5;40m-c\e[0m or  \e[38;5;40m--ccheck\e[0m:\tjob using chk from job just failed will be omitted"
+    echo -e "   \e[38;5;40mno option\e[0m:\t\tall jobs until the end of compound job will be omitted. A compound job contains multiple steps which are needed to obtain complete results."
+    echo -e "   \e[38;5;40m-c\e[0m or    \e[38;5;40m--ccheck\e[0m:\tjob using chk from job just failed will be omitted"
     echo -e "   \e[38;5;40m-d\e[0m or \e[38;5;40m--nodscheck\e[0m:\tscript will NOT remove even steps remaining in the failed multistep job that used the .CHK"
     echo -e "   \e[38;5;40m-o\e[0m or \e[38;5;40m--useoldchk\e[0m:\tcontinue from the previous CHK file without foolproofing. By default, launchanew will abort if any of .chk files mentioned in the input are found in the present directory."
+    echo -e "   \e[38;5;40m-n\e[0m or \e[38;5;40m--monitorchk\e[0m:\tfor debugging reasons, the script will output the list of CHK files in the working directory after the completion of each sub-GJF."
+    echo -e "   \e[38;5;40m-C ARCHIVE\e[0m or \e[38;5;40m--getchks ARCHIVE\e[0m:\n\t\t\tread CHK files for the present calculations from the ARCHIVE (-o/--useoldchk is implied as well)."
     echo
-    echo -e "\e[38;5;40m-s\e[0m or \e[38;5;40m--gofiner\e[0m:\tscript WILL try to solve numeric integration problems by adopting finer grid (might result in problems when comparing with other results!)."
+    echo "Automatic solution of computational problems:"
+    echo -e "\e[38;5;40m-j\e[0m or \e[38;5;40m--gofiner\e[0m:\tscript WILL try to solve numeric integration problems by adopting finer grid (might result in problems when comparing with other results!)."
     echo -e "\e[38;5;40m-s\e[0m or \e[38;5;40m--notrysolve\e[0m:\tscript will NOT try to solve SCF convergence or integration, or Opt, or Polar problems, e.g., switch off FMM when neccessary."
-    echo -e "\nIf the previous option is NOT set, the following two options are also considered:"
+    echo -e "\e[38;5;40m-F\e[0m or \e[38;5;40m--nocalcall\e[0m:\tscript will NOT try to solve optimization problems by adding CalcAll with the current model chemistry."
+    echo -e "\nIf -s/--notrysolve is NOT set, the following three options are also considered:"
+    echo -e "   \e[38;5;40m-e ARG\e[0m or \e[38;5;40m--calcfcevery ARG\e[0m:\n\t\t\tscript will include calculation of method-specific force constants every ARG step (default ARG=20); this may reduce the computational cost."
     echo -e "   \e[38;5;40m-b\e[0m or \e[38;5;40m--banginghead\e[0m:\tscript will also try to solve SCF convergence problems with solutions that might not be working at all (if You are desperate)."
     echo -e "   \e[38;5;40m-g\e[0m or \e[38;5;40m--shsaddle\e[0m:\tscript will NOT try to solve the problem of reaching a saddle point instead of minimum in a geometry optimization, which it usuallu does by shifting the geometry along the normal modes with negative force constants."
     echo
     echo -e "\e[38;5;40m-i\e[0m or \e[38;5;40m--changedir\e[0m:\tsubstitute all paths in the input file for the current directory."
     echo -e "\e[38;5;40m-x\e[0m or \e[38;5;40m--nomaxdisk\e[0m:\tremove the MaxDisk keyword from the Route line (it allows to use all the space in the last scratch directory without the size limit or -1)."
     echo -e "\e[38;5;40m-w\e[0m or \e[38;5;40m--norwfmod\e[0m:\tdo not modify the size or RWF files according to available disk on the node (You may have done it before using different parameters for determination of optimal RWF size)"
-    echo -e "\e[38;5;40m-l \"node1,node2,node3,…\"\e[0m or \e[38;5;40m--addlinda \"node1,node2,node3,…\"\e[0m:\tadd or modify %LindaWorkers directive in the GJF file"
+    echo -e "\e[38;5;40m-l \"node1,node2,node3,…\"\e[0m or \e[38;5;40m--addlinda \"node1,node2,node3,…\"\e[0m:\n\t\t\tadd or modify %LindaWorkers directive in the GJF file"
     echo -e "\e[38;5;40m-p N\e[0m or \e[38;5;40m--noprocmod=N\e[0m:\tuse only N CPU cores for this job; if N=0, do not modify the available memory and number of CPU cores at all (You may have done it before using different parameters for determination of optimal memory size)"
     echo -e "    If You require specific modification of these directives, please call \e[38;5;40mproc2gjf -h\e[0m"
-    echo -e "\e[38;5;40m-z\e[0m or \e[38;5;40m--okzero\e[0m:\tdo NOT remove after the calculation all those files title section of which starts with '::: 0000_000 0000_000'; these files were used to generate .FCHK with relevant data (NO, NTO, etc.)"
+    echo -e "\e[38;5;40m-z\e[0m or \e[38;5;40m--okzero\e[0m:\t\tdo NOT remove after the calculation all those files title section of which starts with '::: 0000_000 0000_000'; these files were used to generate .FCHK with relevant data (NO, NTO, etc.)"
     echo -e "\e[38;5;40m-u\e[0m or \e[38;5;40m--nostupid\e[0m:\tdelete the output file if it contains no 'Normal termination's or a functional lacked abilities for a compound job"
     echo -e "\e[38;5;40m-y\e[0m or \e[38;5;40m--neverstop\e[0m:\tdo not stop batch execution if there are many consequtive errors (e.g., for manual PES scans from autogenerated geoms a priori including overlapping-atom ones)"
-    echo -e "\e[38;5;40m-I ARG\e[0m or \e[38;5;40m--nintersperse=ARG\e[0m:\tto revent longish filenames when erroring, the file is autosplit by a dummy lutil command when distance between lutil lines is more than ARG jobs"
+    echo -e "\e[38;5;40m-I ARG\e[0m or \e[38;5;40m--nintersperse=ARG\e[0m:\n\t\t\tto prevent longish filenames when erroring, the file is autosplit by a dummy lutil command when distance between lutil lines is more than ARG jobs (done by default, and ARG is 10 in that case)"
     echo -e "\e[38;5;40m-f\e[0m or \e[38;5;40m--preservechk\e[0m:\tsuppress deletion of the checkpoint files; by default, they are deleted, if You want to look at orbitals, etc., use formchk or cp in the lutil section."
     echo -e "\e[38;5;40m-k\e[0m or \e[38;5;40m--nodalek\e[0m:\tallows to make job immune to the dalek (a script that is run constantly and every 60 minutes checks for hung-up script over the whole cluster)."
-    echo -e "\e[38;5;40m-m\e[0m or \e[38;5;40m--monram\e[0m:\trequest monitoring RAM usage every 5 minutes, with writing to file $HOME/MemLog.$(uname -n).logg and $HOME/DiskLog.$(uname -n)"
-    echo -e "\e[38;5;40m-Z\e[0m or \e[38;5;40m--notar\e[0m:\tdo not archive the output file (useful for external scripts)"
+    echo -e "\e[38;5;40m-m\e[0m or \e[38;5;40m--monram\e[0m:\t\trequest monitoring RAM usage every 5 minutes, with writing to file $HOME/MemLog.$(uname -n).logg and $HOME/DiskLog.$(uname -n)"
+    echo -e "\e[38;5;40m-Z\e[0m or \e[38;5;40m--notar\e[0m:\t\tdo not archive the output file (useful for external scripts)"
     echo -e "\e[38;5;40m-v\e[0m or \e[38;5;40m--debugging\e[0m:\tdisplay additional debugging information"
     echo -e "\e[38;5;40m-q\e[0m or \e[38;5;40m--requirements\e[0m:\tdisplay requirements for this script"
-    echo -e "\e[38;5;40m-h\e[0m or \e[38;5;40m--help\e[0m:\tdisplay this help."
+    echo -e "\e[38;5;40m-h\e[0m or \e[38;5;40m--help\e[0m:\t\tdisplay this help."
     echo ; echo -e "Options CAN be specified in bulk (e. g., \e[2mlaunchanew -crom input.file\e[0m)."
+}
+
+timecompare() { # computes time difference in minutes; arguments are expected to be in form 17:10 and 5:02
+    h1=$(echo "$1" | cut -d : -f 1); h1=${h1#0}
+    m1=$(echo "$1" | cut -d : -f 2); m1=${m1#0}
+    h2=$(echo "$2" | cut -d : -f 1); h2=${h2#0}
+    m2=$(echo "$2" | cut -d : -f 2); m2=${m2#0}
+    t1=$((h1*60+m1))
+    t2=$((h2*60+m2))
+    if [ $t1 -gt $t2 ]; then
+        return $((t1-t2))
+    else
+        return $((t2-t1))
+    fi
 }
 
 monitlog() {
@@ -184,7 +223,7 @@ getridofdirt(){ # 75 lines long....
         return 1
     fi
     if ($debugging); then
-        echo "Using the following directories:"
+        echo "DEBUG: Using the following directories:"
         echo ""
     fi
     [ -d "${GAUSS_SCRDIR}" ] && [ -n "$(find "${GAUSS_SCRDIR}" -type d -name 'savehaven*')" ] && rmdir ${GAUSS_SCRDIR}/savehaven*$HOSTNAME
@@ -328,7 +367,8 @@ foolproof() { # IS THE CHECKPOINT FOUND IN CURRENT INPUT FILE FOUND ALSO IN THE 
 
 monitorchk() { # PRINTS OUT CHK FILES FOUND IN THE WORKING DIRECTORY OR JUST IN THE INPUT FILE
     presentchks=( $(grep '\.chk' $1 | grep -v 'formchk' | grep -o '[^ =]*\.chk') )  # -mtime 0
-    presentchks=( $(echo ${presentchks[@]} | sed 's/ /\n/g'  | sort -u | xargs ) )
+    importedchks=( $(echo $(tar tf "${iniladir}/${getchks}" || 7z l "${iniladir}/${getchks}") | while read hihi; do echo "$(pwd)/${hihi%fchk}chk"; done ))
+    presentchks=( $(echo ${presentchks[@]} ${importedchks[@]} | sed 's/ /\n/g'  | sort -u | xargs ) )
     if [ -n "$2" ] && [ "$2" == "inf" ]; then
         for klh in ${presentchks[@]}; do
             numbernow="$numbernow $klh"
@@ -383,11 +423,11 @@ copyfirst() { # COPIES THE FIRST JOB SO THAT WE CAN RUN SOMETHING LIKE SCF WITH 
         geomendline=$((geomendline+geombeginline-1))
         sed -i "${geombeginline},${geomendline}d" "$inputtfi"
     fi
-    if [ -n "$(sed -n '1,/^ *#/p' "$inputtfi" | grep -i -e 'Guess[(=]\+[^ ]*\(TCheck\|Huckel\|INDO\|AM1\|Core\|Only\|Always\)')" ]; then
-        sed -i '1,/#/{s@\(TCheck\|[Old]\+Huckel\|INDO\|AM1\|Core\|Only\|Always\)@Read@}' "$inputtfi"
+    if [ -n "$(sed -n '1,'"$bobiek"'p}' "$inputtfi" | grep -i -e 'Guess[(=]\+[^ ]*\(TCheck\|Huckel\|INDO\|AM1\|Core\|Only\|Always\)')" ]; then
+        sed -i '1,'"$bobieks"'\(Guess[(=]\+[^ ]*\)\(TCheck\|[Old]\+Huckel\|INDO\|AM1\|Core\|Only\|Always\)@\1\2Read@I}' "$inputtfi"
     fi
-    if [ -z "$(sed -n '1,/^ *#/p' "$inputtfi" | grep -i -e 'Guess[(=]\+[^ ]*Read')" ]; then
-        sed -i '1,/#/{s/#[^!]*/& Guess=Read/}' "$inputtfi"
+    if [ -z "$(sed -n '1,'"$bobiek"'p}' "$inputtfi" | grep -i -e 'Guess[(=]\+[^ ]*Read')" ]; then
+        sed -i '1,'"$bobieks"'@\1 Guess=Read@}' "$inputtfi"
     fi
     mv "$inputtfi" "$tempora2mt"
     mv "$temporamt" "$inputtfi"
@@ -403,7 +443,7 @@ gaussbouncer() { # CHECKS FOR CYCLING OPTIMIZATIONS AND KILLS THEM
     while true; do
     if [ -f "$1" ]; then
         [ -n "$(echo "carefullness..."; tail -3 $1 | grep -e 'Normal termination' -e 'Error termination')" ] && exit 0
-        if [ -n "$(tac $1 | sed -n '1,/ Standard orientation:/{/#/{/ Opt/Ip}}')" ]; then
+        if [ -n "$(tac $1 | sed -n '1,/ Standard orientation:/{/^ #/,/^ -----/{/ Opt/Ip}}')" ]; then
             echo -e "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\nGaussbouncer will now check how the optimization is running..."
             njobbs=$(grep -c 'Normal termination' $1)
             actualfile=$(echo "$1" | sed 's/\(_1\)*.out//;s/_G[0-9]\+$/_G/')
@@ -466,17 +506,17 @@ cannotzero(){ # REMOVES FROM THE OUTPUT WITH SPECIAL TITLE LINE (USED FOR INTERM
 
 lfna(){
 # inp2=$(echo $2 | sed 's/\:/\\\:/g')
-fstep=""; linenr=$(sed -n "$3"',/Normal termination/p' $1 | grep -m 1 -n -e "$2" | cut -d : -f 1)
-[[ $3 -gt 0 ]] && linenr=$(($linenr+$3-1))
-beidzis=$(sed "$linenr q;d" $1 | sed 's/^.//')
+    fstep=""; linenr=$(sed -n "$3"',/Normal termination/p' $1 | grep -m 1 -n -e "$2" | cut -d : -f 1)
+    [[ $3 -gt 0 ]] && linenr=$(($linenr+$3-1))
+    beidzis=$(sed "$linenr q;d" $1 | sed 's/^.//')
 #echo "Rinda Nr $linenr"; echo "Beidzis ir $beidzis."
-until [[ -n "$(echo $beidzis | grep -e "------")" ]]; do
-    fstep="$fstep$beidzis"
-    ((linenr++))
-    beidzis=$(sed "$linenr q;d" $1 | sed 's/^.//') #; echo "Tagad beidzis ir $beidzis."
-done
-echo $fstep
-return 0;     
+    until [[ -n "$(echo $beidzis | grep -e "------")" ]]; do
+        fstep="$fstep$beidzis"
+        ((linenr++))
+        beidzis=$(sed "$linenr q;d" $1 | sed 's/^.//') #; echo "Tagad beidzis ir $beidzis."
+    done
+    echo $fstep
+    return 0;     
 }
 
 ifind(){ # FIND THE PHRASE $2 IN THE INPUT FILE $1 NO MORE THAN $3 TIMES
@@ -495,10 +535,22 @@ ifind(){ # FIND THE PHRASE $2 IN THE INPUT FILE $1 NO MORE THAN $3 TIMES
                     dalafaila="$(echo "$dalafaila" | sed '1,/--Link1--/Id')"
                 done ;;
         esac
-        echo $(echo "$vissfails" | grep -e "$2" | sed 's/^ *//;s/ *\$//')
+        if [ "$2" == ":::" ]; then
+            echo $(echo "$vissfails" | sed -n '/^#/{:ringo;n;/#/bringo;n;:gints;p;n;/^ *$/!bgints}' | xargs) # | sed 's/^ *//;s/ *\$//'
+        elif [ "$2" == "#" ]; then
+            echo $(echo "$vissfails" | sed -n '/^#/{:ringo;p;n;/#/bringo}' | sed 's@[!][^\n]*@@' | xargs)
+        else
+            echo $(echo "$vissfails" | grep -e "$2" | sed 's/^ *//;s/ *$//')
+        fi
     else
         vissfails=$(cat $1 | sed -n '1,/--Link1--/I{s/\r//g;p}')
-        echo $(echo "$vissfails" | grep -m 1 -e "$2" | sed 's/^ *//;s/ *\$//')
+        if [ "$2" == ":::" ]; then
+            echo $(echo "$vissfails" | sed -n '/^#/{:ringo;n;/#/bringo;n;:gints;p;n;/^ *$/!bgints;:ieva;n;bieva}' | xargs)
+        elif [ "$2" == "#" ]; then
+            echo $(echo "$vissfails" | sed -n '/^#/{:ringo;p;n;/#/bringo;:ieva;n;bieva}' | sed 's@[!][^\n]*@@' | xargs)
+        else
+            echo $(echo "$vissfails" | grep -m 1 -e "$2" | sed 's/^ *//;s/ *$//')
+        fi
     fi
 }
 
@@ -551,14 +603,16 @@ erasedefectous() { # ERASE FROM THE INPUT FILE $icurinfile JOBS CONTAINING $1, E
                     [ -n "$(sed -n '1,/--Link1--/Ip' $sweptfile | grep -i '^%Chk='"$1")" ] && echo "Also, this new geometry will now replace whatever bad was there in that failed .CHK file; hence the erasing must stop now." && break 2
                 fi
                 [ -z "$(sed -n '1,/--Link1--/Ip' $sweptfile | grep -i -E 'Geom[=(]*Check|Guess[^ ]*Read|Guess[^ ]*TCheck|NonEq=Read|ReadFC')" ] && [ -n "$curchk" ] && { echo " but somehow the job will not be deleted because some unrealistic condition has been satisfied!"; break 2; } # it means the defectous CHK gets overwritten by some next task`
-                [ -z "$(sed -n '1,/--Link1--/Ip' $sweptfile | grep -i -E 'NonEq=Read')" ] && [ -n "$(sed -n '1,/--Link1--/Ip' $sweptfile | grep -i -E ' Opt')" ] && [ -z "$(cat $curoutfile | grep -e "Atoms too close" -e 'Problem with the distance matrix')" ] && [ -n "$curchk" ] && sed -i '1,/--Link1--/I{/#/{s/\(Guess[^ ]*\)Read\([^ ]*\)/\1,\2/;s/(,/(/g;s/,)/)/g;s/=,/=/g;s/,,/,/g; s/ Guess[=()]*//}}' "$sweptfile" && { echo " but the job is not removed because there is a chance that the geometry is not corrupted and gets modified during the optimization in this job."; break 2; } # it means the defectous CHK gets overwritten by the geometry optimization
+                [ -z "$(sed -n '1,/--Link1--/Ip' $sweptfile | grep -i -E 'NonEq=Read')" ] && [ -n "$(sed -n '1,/--Link1--/Ip' $sweptfile | grep -i -E ' Opt')" ] && [ -z "$(cat $curoutfile | grep -e "Atoms too close" -e 'Problem with the distance matrix')" ] && [ -n "$curchk" ] && sed -i '1,/--Link1--/I{/#/{:bob;N;/\n#[^\n]*$/bbob;s/\(Guess[^ ]*\)Read\([^ ]*\)/\1,\2/;s/(,/(/g;s/,)/)/g;s/=,/=/g;s/,,/,/g; s/ Guess[=()]*//}}' "$sweptfile" && { echo " but the job is not removed because there is a chance that the geometry is not corrupted and gets modified during the optimization in this job."; break 2; } # it means the defectous CHK gets overwritten by the geometry optimization
             fi
-            [ "${1: -1}" == '/' ] && [ -z "$(sed -n '1,/#/n;p' $sweptfile | grep -i -E 'DCSHG|ExternalIteration')" ] && [ -z "$(sed -n '1,/^#/n;p' $sweptfile | grep -i -e ' TD[=(]' -e ' CIS[=(]' -e ' EOM' -e 'SAC-CI')" ] && { curchk=""; echo "but the job is not removed because it does not involve second derivatives by field or excited state calculations."; }
+# next line contained sed commands like '1,/#/n;p' which actually print every second line until # block has ended. I believe this was not the intention, so I replaced these commands
+            [ "${1: -1}" == '/' ] && [ -z "$(sed -n '1,'"$bobiek"'p}' $sweptfile | grep -i -E 'DCSHG|ExternalIteration')" ] && [ -z "$(sed -n '1,'"$bobiek"'p}' $sweptfile | grep -i -e ' TD[=(]' -e ' CIS[=(]' -e ' EOM' -e 'SAC-CI')" ] && { curchk=""; echo "but the job is not removed because it does not involve second derivatives by field or excited state calculations."; }
             echo # in case it was neither CHK nor functional name
             if ($debugging); then
-                [ -n "$curchk" ] && echo "So, the following job will be removed:" || echo "So, the following job will NOT be removed:"
+                [ -n "$curchk" ] && echo "DEBUG: So, the following job will be removed:" || echo "DEBUG: So, the following job will NOT be removed:"
                 ifind $sweptfile '^#' | sed 's/\r//'
                 ifind $sweptfile ':::' | sed 's/\r//'
+                echo "DEBUG END"
                 echo
             fi
 
@@ -718,7 +772,7 @@ casmonkey() { # NOT FINISHED YET
     else
         for macaque in $(seq 1 $(wc -l < casbaboon)); do
             cp $curinfile ${curinfile%.gjf}_C$macaque.gjf
-            sed -i '1,/Link1/I{/###/!{/#/s/#[^!]*/& Guess=Alter/;s/CAS_CAPUCHINE/'"$(head -1 casbaboon)"'/}}' ${curinfile%.gjf}_C$macaque.gjf
+            sed -i '1,/--Link1--/I{/###/!{'"$bobieks"'@\1 Guess=Alter@};s/CAS_CAPUCHINE/'"$(head -1 casbaboon)"'/}}' ${curinfile%.gjf}_C$macaque.gjf
             sed '1d' ${curinfile%.gjf}_C$macaque.gjf
             until [ $tutelka -eq 0 ]; do
                 checkout ${curinfile%.gjf}_C$macaque.gjf ${curoutfile%.out}_C$macaque.out && tutelka=0 || { sed -i '/^:::/s/_/\//g' ${curinfile%.gjf}_C$macaque.gjf; g09 < ${curinfile%.gjf}_C$macaque.gjf > ${curoutfile%.out}_C$macaque.out; exitcodd=$?; sed -i '/GINC/,/ob cpu tim/!{/^ :::/,/---/s/\//_/g}' ${curoutfile%.out}_C$macaque.out; }
@@ -727,7 +781,7 @@ casmonkey() { # NOT FINISHED YET
         catarrchine=macaque
         for macaque in $(seq 1 $(wc -l < casbaboon2)); do
             cp $curinfile ${curinfile%.gjf}_C$((catarrchine+macaque)).gjf
-            sed -i '1,/Link1/I{/###/!{/#/s/#[^!]*/& Guess=Alter/;s/CAS_CAPUCHINE/'"$(head -2 casbaboon2)"'/}}' ${curinfile%.gjf}_C$((catarrchine+macaque)).gjf
+            sed -i '1,/--Link1--/I{/###/!{'"$bobieks"'@\1 Guess=Alter@};s/CAS_CAPUCHINE/'"$(head -2 casbaboon2)"'/}}' ${curinfile%.gjf}_C$((catarrchine+macaque)).gjf
             sed '2d' ${curinfile%.gjf}_C$((catarrchine+macaque)).gjf
             until [ $tutelka -eq 0 ]; do
                 checkout ${curinfile%.gjf}_C$((catarrchine+macaque)).gjf ${curoutfile%.out}_C$((catarrchine+macaque)).out && tutelka=0 || { sed -i '/^:::/s/_/\//g' ${curinfile%.gjf}_C$((catarrchine+macaque)).gjf; g09 < ${curinfile%.gjf}_C$((catarrchine+macaque)).gjf > ${curoutfile%.out}_C$((catarrchine+macaque)).out; exitcodd=$?; sed -i '/GINC/,/ob cpu tim/!{/^ :::/,/---/s/\//_/g}' ${curoutfile%.out}_C$((catarrchine+macaque)).out; }
@@ -738,24 +792,42 @@ casmonkey() { # NOT FINISHED YET
 
 imgsolver() {
 # I must refer here to pyQRC by  Robert Paton (https://github.com/bobbypaton/pyQRC/blob/master/LICENSE) which helped a lot to understand how to actually shift the geometry (simple things are not obvious for everyone, duh)
-    findmingeom -xlj "$totlines" "$2" saddlegeom.${HOSTNAME}.xyz
-    tac "$2" | sed -n '1,/imaginary frequencies (negative Sig/p' | tac | sed '1,/^  Atom  AN/d;/^                      4/,$d' | gawk '{print $3 " " $4 " " $5}' > shiftgeom.${HOSTNAME}.gem
-    shift_coords.py saddlegeom.${HOSTNAME}.xyz shiftgeom.${HOSTNAME}.gem offsaddlegeom.${HOSTNAME}.xyz
-    if [ -n "$(tac "$2" | sed -n '/2 imaginary frequencies (negative Sig/p')" ]; then
-        tac "$2" | sed -n '1,/imaginary frequencies (negative Sig/p' | tac | sed '1,/^  Atom  AN/d;/^                      4/,$d' | gawk '{print $6 " " $7 " " $8 " "}' > shiftgeom.${HOSTNAME}.gem
-        shift_coords.py offsaddlegeom.${HOSTNAME}.xyz shiftgeom.${HOSTNAME}.gem offsaddlegeom2.${HOSTNAME}.xyz
-        mv -f offsaddlegeom2.${HOSTNAME}.xyz offsaddlegeom.${HOSTNAME}.xyz
-    fi
     ($debugging) && echo "DEBUG: Using the imaginary frequency solver..."
-    geomfromdone "$icurinfile" offsaddlegeom.${HOSTNAME}.xyz "$nrdone" "$totlines" 0 "$debugging" || { echo "Solving the imaginary frequency problem failed! Aborting."; rm offsaddlegeom.${HOSTNAME}.xyz offsaddlegeom2.${HOSTNAME}.xyz shiftgeom.${HOSTNAME}.gem saddlegeom.${HOSTNAME}.xyz; return 7; }
-    rm offsaddlegeom.${HOSTNAME}.xyz shiftgeom.${HOSTNAME}.gem saddlegeom.${HOSTNAME}.xyz
-    [ -f offsaddlegeom2.${HOSTNAME}.xyz ] && rm offsaddlegeom2.${HOSTNAME}.xyz
+    shifmul=3
+    ifhaveopt="$(sarakstu2 $2 | grep -e '^ *#' | sed -n "$totlines"'p' | grep ' Opt')"
+    didihaveopt="$(sarakstu2 $2 | grep -e '^ *#' | sed -n "$nrdone"'p')"
+    if [ -z "$ifhaveopt" ] && [ -n "$(echo "$didihaveopt" | grep ' Opt')" ]; then
+        sed -i '1,/--Link1--/I{'"$bobieks"'@'"$didihaveopt"'@}}' $icurinfile # reoptimizing after the shift requires optimization job; sometimes the force constants are sourced elsewhere...
+    fi
+    findmingeom -xlj "$totlines" -a /tmp/normalmode_gaus_$$_last.xyz "$2"
+    natoms=$(gawk '/NAtoms=/{print $2; exit}' "$2")
+# Getting the number of imaginary modes:
+    numimag="$(gawk '/imaginary frequencies \(negative Sig/{print $2}' "$2")"
+    [ -z "$numimag" ] && echo "No imaginary nodes found! Aborting..." && exit 3
+    imaginaries=($(seq 1 $numimag))
+# Getting all the normal modes:
+    normalmodes="$(sed -n '/imaginary frequencies (negative Sig/,/^ *$/p' "$2" | sed '1,7d;$d')" && echo "Normal modes extracted!"
+# Selecting the imaginary normal modes, printing them to separate files, applying the shift to the last XYZ coordinates
+    for ima in $(seq 1 ${#imaginaries[@]}); do
+        echo "Processing imaginary mode ${ima}..."
+        [ -f /tmp/normalmode_gaus_$$_shifted.xyz ] && rm /tmp/normalmode_gaus_$$_last.xyz && mv /tmp/normalmode_gaus_$$_shifted.xyz /tmp/normalmode_gaus_$$_last.xyz
+        im=$((ima-1))
+        echo "$normalmodes" | gawk '/ '"${imaginaries[$im]}"' [^.]*$/ || / '"${imaginaries[$im]}"'$/ {j=0; for(i=1;i<NF+1;i++) {if($i ~ '"${imaginaries[$im]}"') j=i }; for(i=0;i<6;++i) {getline}; for(i=0;i<'"$natoms"';++i) {getline; print $((j-1)*3+3)"  "$((j-1)*3+4)"  "$((j-1)*3+5)}}' > /tmp/normalmode_gaus_$$_${im}.tmp
+        #less /tmp/normalmode_gaus_$$_${im}.tmp
+        #less /tmp/normalmode_gaus_$$_last.xyz
+        shift_coords.py /tmp/normalmode_gaus_$$_last.xyz /tmp/normalmode_gaus_$$_${im}.tmp /tmp/normalmode_gaus_$$_shifted.xyz $shifmul
+    done
+# Moving the file to the $PWD and removing the temporary files if successful
+    cp /tmp/normalmode_gaus_$$_shifted.xyz offsaddlegeom.${HOSTNAME}_$$.xyz && rm /tmp/normalmode_gaus_$$_* && echo "The shifted geometry saved in XYZ offsaddlegeom.${HOSTNAME}_$$.xyz"
+
+    geomfromdone "$icurinfile" offsaddlegeom.${HOSTNAME}_$$.xyz "$nrdone" "$totlines" 0 "$debugging" || { echo "Solving the imaginary frequency problem failed! Aborting."; rm offsaddlegeom.${HOSTNAME}_$$.xyz; return 7; }
+    rm offsaddlegeom.${HOSTNAME}_$$.xyz
 }
 mcscfsolver() {
-    if [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5/7=')" ]; then
-        sed -i '/###/!{/#/{s/#[^!]*/& IOp(5\/7=128)/;:a;n;ba}}' $icurinfile
+    if [ -z "$(echo "$failedsteproute" | sed 's@[!].*@@' | grep -i 'IOp(5/7=')" ]; then
+        sed -i '/###/!{'"$bobieks"'@\1 IOp(5\/7=128)@;:a;n;ba}}' "$icurinfile"
     else
-        sed -i '/###/!{/#/{s/IOp(5\/7=[^,) ]*/IOp(5\/7=256/;:a;n;ba}}' $icurinfile
+        sed -i '/###/!{'"$bobieks"'IOp(5\/7=[^,) ]*@\1 IOp(5\/7=256@;:a;n;ba}}' "$icurinfile"
     fi
 }
 scfsolver() {
@@ -769,11 +841,11 @@ scfsolver() {
                echo "Please consider using Integral=UltrafineGrid!"
            else
                echo "Changing grid to UltraFine..."
-               wasgrid=$(echo "$failedsteproute" | grep -o -e '\b[gG][Rr][Ii][Dd]=[^ ,)]*' -e '\b[Ii][Nn][Tt][Ee]*[Gg]*[Rr]*[Aa]*[Ll]*[=(]\+[^\s]*\([[:alnum:]][Gg][Rr][Ii][Dd]\)')
+               wasgrid=$(echo "$failedsteproute" | sed 's@[!].*@@' | grep -o -e '\b[gG][Rr][Ii][Dd]=[^ ,)]*' -e '\b[Ii][Nn][Tt][Ee]*[Gg]*[Rr]*[Aa]*[Ll]*[=(]\+[^\s]*\([[:alnum:]][Gg][Rr][Ii][Dd]\)')
                if [ -n "$wasgrid" ]; then
-                   sed -i '/#/{s/\(.*grid=\)[^ ,)]\+/\1UltraFine/I;s/\(Int[e]*[g]*[r]*[a]*[l]*[=(]\+[^\s]*\)[[:alnum:]][Gg][Rr][Ii][Dd]/\1UltraFineGrid/I;:a;n;ba}' "$icurinfile"
+                   sed -i "$bobieks"'\(.*grid=\)[^ ,)]\+@\1 \2UltraFine@I;s/\(Int[e]*[g]*[r]*[a]*[l]*[=(]\+[^\s]*\)[[:alnum:]][Gg][Rr][Ii][Dd]/\1UltraFineGrid/I;:a;n;ba}' "$icurinfile"
                else
-                   sed -i '/#/{s/#[^!]*/& Integral=UltraFineGrid/;:a;n;ba}' $icurinfile
+                   sed -i "$bobieks"'@\1 Integral=UltraFineGrid@;:a;n;ba}' "$icurinfile"
                fi
            fi
            echo -e "\nUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfiUfi\n"
@@ -783,21 +855,21 @@ scfsolver() {
                echo "Please consider using Integral=SuperFineGrid!"
            else
                echo "Changing grid to SuperFine..."
-               wasgrid=$(echo "$failedsteproute" | grep -o -e '\b[gG][Rr][Ii][Dd]=[^ ,)]*' -e '\b[Ii][Nn][Tt][Ee]*[Gg]*[Rr]*[Aa]*[Ll]*[=(]\+[^\s]*\([[:alnum:]][Gg][Rr][Ii][Dd]\)')
+               wasgrid=$(echo "$failedsteproute" | sed 's@[!].*@@' | grep -o -e '\b[gG][Rr][Ii][Dd]=[^ ,)]*' -e '\b[Ii][Nn][Tt][Ee]*[Gg]*[Rr]*[Aa]*[Ll]*[=(]\+[^\s]*\([[:alnum:]][Gg][Rr][Ii][Dd]\)')
                if [ -n "$wasgrid" ]; then
-                   sed -i '/#/{s/\(.*grid=\)[^ ,)]\+/\1SuperFine/I;s/\(Int[e]*[g]*[r]*[a]*[l]*[=(]\+[^\s]*\)[[:alnum:]][Gg][Rr][Ii][Dd]/\1SuperFineGrid/I;:a;n;ba}' "$icurinfile"
+                   sed -i "$bobieks"'\(.*grid=\)[^ ,)]\+@\1\2SuperFine@I;s/\(Int[e]*[g]*[r]*[a]*[l]*[=(]\+[^\s]*\)[[:alnum:]][Gg][Rr][Ii][Dd]/\1SuperFineGrid/I;:a;n;ba}' "$icurinfile"
                else
-                   sed -i '/#/{s/#[^!]*/& Integral=SuperFineGrid/;:a;n;ba}' $icurinfile
+                   sed -i "$bobieks"'@\1 Integral=SuperFineGrid/;:a;n;ba}' "$icurinfile"
                fi
            fi
            echo -e "\nSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfiSfi\n"
        fi
-       wasguess=$(echo "$failedsteproute" | grep -o '[gG]uess[=(][^ ]*')
+       wasguess=$(echo "$failedsteproute" | sed 's@[!].*@@' | grep -o '[gG]uess[=(][^ ]*')
        if [ -n "$wasguess" ]; then
            modguess=$(echo "($wasguess)" | sed 's/Read//I;s/TCheck//I;s/(Guess[=(]*/Guess=(INDO,/I;s/,)/)/;s/(,/(/;s/Guess[=]*()//I')
-           sed -i '/#/{s/'$wasguess'/'$modguess'/;:a;n;ba}' $icurinfile
+           sed -i "${bobieks}${wasguess}"'@\1'"$modguess"'@;:a;n;ba}' "$icurinfile"
        else
-           sed -i '/#/{s/#[^!]*/& Guess=INDO/;:a;n;ba}' $icurinfile
+           sed -i "$bobieks"'@\1 Guess=INDO@;:a;n;ba}' "$icurinfile"
        fi
        #  #  if Integral=UltraFine is not helping, sometimes, people say, the problem is the guess (see, e.g., https://www.researchgate.net/post/Does_any_one_know_how_to_troubleshoot_an_optimization_terminated_with_error_Inaccurate_quadrature_in_CalDSu
     elif [ -n "$(tail -n 20 $2 | grep "CPHF failed to converge")" ]; then
@@ -807,58 +879,60 @@ scfsolver() {
         #    [ "$(grep -m 1 '#' "$1")" == "$(grep -m 1 '#' "${1%_1.gjf}.gjf")" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -lt 2 ] && { echo "Pitifully retreating solver. Proceeding with next ones..."; export solvecphf=0; }
         #fi
     else # if the error was not about the integration...
-        [ -z "$(echo "$failedsteproute" | grep -i 'SCF')" ] && sed -i '1,'"$endsolvhere"'{/#/s/#[^!]*/& SCF=(IntRep,NoVarAcc)/}' $icurinfile
-        failedsteproute=$(ifind $icurinfile "#")
-        [ -z "$(echo "$failedsteproute" | grep -i 'SCF[=]*(')" ] && { sed -i '1,/#/s/SCF[=]*[^ ]*/(&)/I' $icurinfile ; sed -i '1,/#/{s/(SCF=/SCF=(/I;s/(SCF/SCF=(/I}' $icurinfile; }
-        failedsteproute=$(ifind $icurinfile "#")
-        [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i 'NoVarAcc')" ] && sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/&NoVarAcc,/I}' $icurinfile
-        failedsteproute=$(ifind $icurinfile "#")
-        [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i 'IntRep')" ] && sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/&IntRep,/I}' $icurinfile
-        failedsteproute=$(ifind $icurinfile "#")
-        [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i 'NoIncFock')" ] && sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/&NoIncFock,/I}' $icurinfile
-        failedsteproute=$(ifind $icurinfile "#")
+        if [ "${icurinfile/_1_1.gjf/}" != "$icurinfile" ]; then # should not start this outright after the first error occurs!
+            [ -z "$(echo "$failedsteproute" | grep -i 'SCF')" ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'@\1 SCF=(IntRep,NoVarAcc)@}}' "$icurinfile"
+            failedsteproute=$(ifind $icurinfile "#")
+            [ -z "$(echo "$failedsteproute" | grep -i 'SCF[=]*(')" ] && { sed -i '1,'"$bobieks"'\(SCF[=]*[^ ]*\)@\1(\2)@I}' "$icurinfile"; sed -i '1,'"$bobieks"'(SCF=@SCF=(@I;s/(SCF/SCF=(/I}' "$icurinfile"; }
+            failedsteproute=$(ifind $icurinfile "#")
+            [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i 'NoVarAcc')" ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[=(]*\)@\1\2NoVarAcc,@I}}' "$icurinfile"
+            failedsteproute=$(ifind $icurinfile "#")
+            [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i 'IntRep')" ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[=(]*\)@\1\2IntRep,@I}}' "$icurinfile"
+            failedsteproute=$(ifind $icurinfile "#")
+            [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i 'NoIncFock')" ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[=(]*\)@\1\2NoIncFock,@I}}' "$icurinfile"
+            failedsteproute=$(ifind $icurinfile "#")
+        fi
         if [ -n "$(tail -20 $2 | grep -e 'No SCF=DM or SCF=QC with SCI-PCM')" ]; then
-            sed -i '/#/{s/\(SCF[^ ]*\)YQC/\1/;s/\(SCF[^ ]*\)XQC/\1/;s/\(SCF[^ ]*\)QC/\1/' $icurinfile
+            sed -i "$bobieks"'\(SCF[^ ]*\)YQC@\1\2@;s/\(SCF[^ ]*\)XQC/\1/;s/\(SCF[^ ]*\)QC/\1/' "$icurinfile"
         fi
         if [ -n "$(tail -20 $2 | grep -e 'o lower point found -- run abo' -e 'Convergence failure\.')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'scipcm')" ]; then
            export solveacc2=3
            echo "Please consider using Integral=UltrafineGrid!"
-           [ -n "$(echo "$failedsteproute" | grep -i 'YQC')" ] && sed -i '1,'"$endsolvhere"'{/#/s/YQC/XQC/I}' $icurinfile 
+           [ -n "$(echo "$failedsteproute" | grep -i 'YQC')" ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(YQC\)@\1XQC@I}}' "$icurinfile"
            # specific case: steepest descent failed
            myL508maxNR=$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -o '[Mm]ax[Nn][Rr]=[0-9]\+' | cut -d '=' -f 2)
            if [ -z "$(echo "$failedsteproute" | grep -i 'FullLinear')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(FullLinear,/I}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[=(]*\)@\1SCF=(FullLinear,@I}}' "$icurinfile"
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i -e 'VTL' -e 'VeryTightLin')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(VTL,/I}' "$icurinfile"
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[=(]*\)@\1SCF=(VTL,@I}}' "$icurinfile"
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i -e 'DM')" ]; then # direct minimization with classic Roothaan SCF
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(DM,/I}' "$icurinfile"
-               sed -i '/#/{s/#[^!]*/& IOp(5\/8=2)/I;:a;n;ba}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(DM,@I}}' "$icurinfile"
+               sed -i "$bobieks"'@\1 IOp(5\/8=2)@I;:a;n;ba}' "$icurinfile"
            elif [ -n "$(echo "$failedsteproute" | grep -i -e 'IOp([^)]*5\/8=2')" ]; then # direct minimization with conjugate gradient
-               sed -i '1,'"$endsolvhere"'{/#/s@\(IOp([^)]*\)5/8=2@\15/8=4@I}' "$icurinfile"
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(IOp([^)]*\)5/8=2@\1\25/8=4@I}}' "$icurinfile"
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i -e 'VShift')" ]; then # adding an additional job with shifted levels and using it as a new quess
                copyfirst "$icurinfile"
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[^)]*/SCF=VShift/I}' "$icurinfile"
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[^)]*@\1SCF=VShift@I}}' "$icurinfile"
            #1-desperate: Adding QC
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i '[YX]*QC')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'scipcm')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(YQC,MaxConventionalCyc=40,/I}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(YQC,MaxConventionalCyc=20,@I}}' "$icurinfile"
            #2-desperate: Adding Fermi broadening
            elif [ -z "$(echo "$failedsteproute" | grep -i 'Fermi')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=2[23]')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(Fermi,/I}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(Fermi,@I}}' "$icurinfile"
            # the MaxNR option has an effect only on L508
            elif [ -n "$myL508maxNR" ] && ($banginghead); then
                case $myL508maxNR in
                    2)
-                       sed -i '1,'"$endsolvhere"'{/#/s/MaxNR=2/MaxNR=3/I}' $icurinfile
+                       sed -i '1,'"$endsolvhere"'{'"$bobieks"'MaxNR=2@\1MaxNR=3@I}}' "$icurinfile"
                        ;;
                    3)
-                       sed -i '1,'"$endsolvhere"'{/#/s/MaxNR=3/MaxNR=4/I}' $icurinfile
+                       sed -i '1,'"$endsolvhere"'{'"$bobieks"'MaxNR=3@\1MaxNR=4@I}}' "$icurinfile"
                        ;;
                    4)
-                       [ -z "$(echo "$failedsteproute" | grep -i '5\/8=1114')" ] && sed -i '1,'"$endsolvhere"'{/#/s/^#[^!]*/& IOp(5\/8=1114)/}' $icurinfile # switch to DIIS early
+                       [ -z "$(echo "$failedsteproute" | grep -i '5\/8=1114')" ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'@\1 IOp(5\/8=1114)@}}' $icurinfile # switch to DIIS early
                        ;;
                esac
            elif ($banginghead); then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(MaxNR=3,/I}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(MaxNR=3,@I}}' "$icurinfile"
            fi
         elif [ -n "$(echo "$failedsteproute" | grep -i 'scipcm')" ] ; then
            ##### SCI-PCM FAILURE #####
@@ -867,51 +941,51 @@ scfsolver() {
            echo "Damping is now $irdamp"
            #1: Adding damping
            if [ -z "$(echo "$failedsteproute" | grep -i '[,(]Damp')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(Damp,/I}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(Damp,@I}}' "$icurinfile"
            #2a: Damping more
            elif [ -n "$(echo "$failedsteproute" | grep -i '[(,]Damp')" ] && { [ -n "$irdamp" ] && [ "$irdamp" -lt 20 ] || [ -z "$irdamp" ]; } && ($banginghead); then # [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ]
                wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/18=[^ ]*' -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-               for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!*/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-               sed -i '1,'"$endsolvhere"'{/#/s/NDamp=[^,)]//I;s/SCF[=(]*/SCF=(NDamp=20,/I}' $icurinfile # default: 10
-               [ $wasdamped -lt 10 ] && sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/18=50) IOp(5\/21=5) IOp(5/108=10) !/ }' $icurinfile # 5/18=50: mixing half of old density while damping; 5/21=5: damp even when the error is as low as 10E-5 (defaul 10E-3); 5/108=10: minimum number of iterations to use damping
+               for hik in $wasiopscf; do sed -i '1,/--Link1/{'"$bobieks"''"${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'NDamp=[^,)]@\1@I;s/SCF[=(]*/SCF=(NDamp=20,/I}}' $icurinfile # default: 10
+               [ $wasdamped -lt 10 ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*/\1\2 IOp(5\/18=50) IOp(5\/21=5) IOp(5/108=10) !/ }}' $icurinfile # 5/18=50: mixing half of old density while damping; 5/21=5: damp even when the error is as low as 10E-5 (defaul 10E-3); 5/108=10: minimum number of iterations to use damping
            #3: Tighter thresholds for linear equation, good for semi-linear cases
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -e 'VTL' -e 'VeryTightLin')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(VTL,/I}' "$icurinfile"
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(VTL,@I}}' "$icurinfile"
            #2b: Damping, damping...
            elif [ -n "$(echo "$failedsteproute" | grep -i '[(,]Damp')" ] && { [ -n "$irdamp" ] && [ "$irdamp" -lt 75 ]; }; then
                wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/18=[^ ]*' -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-               for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-               sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ ]*NDamp\)=[^,)]*/\1=75,/I}' $icurinfile
-               [ $wasdamped -lt 20 ] && sed -i '/#/{s/\(.*\)!/\1 IOp(5\/18=50) IOp(5\/21=5) !/ }' $icurinfile
+               for hik in $wasiopscf; do sed -i '1,/--Link1/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ ]*NDamp\)=[^,)]*@\1\2=75,@I}}' "$icurinfile"
+               [ $wasdamped -lt 20 ] && sed -i "$bobieks"'\(.*\)!*@\1\2 IOp(5\/18=50) IOp(5\/21=5) !@ }' "$icurinfile"
            #2c: Turning on the commutator instead of mix of energy and commutator
            elif [ -z "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && ($banginghead); then
                wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-               for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-               sed -i '/#/{s/SCF[=(]*/SCF=(CDIIS,/I;s/\(.*\)!/\1 IOp(5\/20=1) !/ }' $icurinfile
+               for hik in $wasiopscf; do sed -i '1,/--Link1/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*/\1\2! '"${hik//\//\\/}"' /}}' "$icurinfile"; done
+               sed -i "$bobieks"'SCF[=(]*@\1SCF=(CDIIS,@I;s/\(.*\)!*/\1 IOp(5\/20=1) !/ }' "$icurinfile"
            #4: Full linear search even if the initial microiteration was successful
            elif [ -z "$(echo "$failedsteproute" | grep -i 'FullLinear')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(FullLinear,/I}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(FullLinear,@I}}' "$icurinfile"
            #5: no CDIIS, but Damp
            elif [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && [ -z "$(echo "$failedsteproute" | grep -i '[(,]Damp')" ] && ($banginghead); then
                wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-               for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-               sed -i '1,'"$endsolvhere"'{/#/s/\(CDIIS\)\(.*\)!/Damp\2 !/ }' $icurinfile
+               for hik in $wasiopscf; do sed -i '1,/--Link1/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(CDIIS\)\(.*\)!*@\1Damp\3 !@ }}' "$icurinfile"
            #6: Adding Fermi broadening
            elif [ -z "$(echo "$failedsteproute" | grep -i 'Fermi')" ]; then
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(Fermi,/I}' $icurinfile
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(Fermi,@I}}' "$icurinfile"
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i -e 'VShift')" ]; then # adding an additional job with shifted levels and using it as a new quess
                copyfirst "$icurinfile"
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[^)]*/SCF=VShift/I}' "$icurinfile"
+               sed -i '1,/--Link1--/{'"$bobieks"'SCF[^)]*@\1SCF=VShift@I}}' "$icurinfile"
            #7: KyDiag # probably irrelevant...
            elif [ -n "$(echo "$failedsteproute" | grep -i 'NDamp=75')" ] && ($banginghead); then
                wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/16=[^ ]*' | xargs)"
-               for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-               sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ ]*\)NDamp=[^,)]*/\1/I;s/(,/(/;s/,,/,/;s/,)/)/;s/\(.*\)!/\1 IOp(5\/16=2) !/ }' $icurinfile
+               for hik in $wasiopscf; do sed -i '1,/--Link1/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ ]*\)NDamp=[^,)]*@\1\2@I;s/(,/(/;s/,,/,/;s/,)/)/;s/\(.*\)!*/\1 IOp(5\/16=2) !/ }}' "$icurinfile"
            #8: Jacobi diagonalization (old, slow but robust) # probably irrelevant...
            elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(5\/16=2)')" ] && ($banginghead); then
                wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/16=[^ ]*' | xargs)"
-               for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-               sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/16=10) !/ }' $icurinfile
+               for hik in $wasiopscf; do sed -i '1,/--Link1/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/16=10) !@ }}' "$icurinfile"
            fi
            [ "$realfailedsteproute" != "$failedsteproute" ] && echo "0" > scfsolver.$HOSTNAME.tmp || echo "3" > scfsolver.$HOSTNAME.tmp
         elif [ -z "$(echo "$failedsteproute" | grep -o '[rR][oO][^ /]*/')" ]; then # most freqent case
@@ -919,161 +993,161 @@ scfsolver() {
             irdamp=$(echo "$failedsteproute" | grep -o '[Nn][Dd]amp=[^,)]' | cut -d '=' -f 2)
             #1: Adding YQC
             if [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i 'YQC')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'scipcm')" ]; then
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(YQC,MaxConventionalCyc=40,/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"${bobieks}"'SCF[=(]*@\1SCF=(YQC,MaxConventionalCyc=40,@I}}' "$icurinfile"
             #2: Adding Fermi broadening
             elif [ -z "$(echo "$failedsteproute" | grep -i 'Fermi')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=2[23]')" ]; then
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(Fermi,/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(Fermi,@I}}' "$icurinfile"
           #      #3: Tightening threshold for switching to the commutator
           #      elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=204')" ]; then
           #          wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-          #          for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-          #          sed -i '/#/{s/#[^!]*/& IOp(5\/22=2043)/I;:a;n;ba}' $icurinfile
+          #          for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+          #          sed -i "$bobieks"'@\1 IOp(5\/22=2043)@I;:a;n;ba}' "$icurinfile"
             #3a: Further tightening threshold for switching to the commutator
             elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=304')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/#[^!]*/& IOp(5\/22=3043) /I}' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'@\1 IOp(5\/22=3043) @I}}' "$icurinfile"
             #3b: Adding an additional job with shifted levels and using it as a new quess
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i -e 'VShift')" ]; then
                copyfirst "$icurinfile"
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[^)]*/SCF=VShift/I}' "$icurinfile"
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[^)]*@\1SCF=VShift@I}}' "$icurinfile"
             #4: Turning the commutator off altogether and switching to EDIIS, also disabling Fermi
             elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=2[23]')" ]; then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(NoDamp,/I;s/\(SCF[^ )]*\)Fermi[,]*/\1/I}' $icurinfile
-                sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/22=23) !/}' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(NoDamp,@I;s/\(SCF[^ )]*\)Fermi[,]*/\1/I}}' "$icurinfile"
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/22=23) !@}}' "$icurinfile"
             #5: Turning EDIIS off and turning on the commutator and the damping
             elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=2[23]')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'CDIIS')" ]; then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ )]*\)NoDamp[,]*/\1/I}' $icurinfile
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(CDIIS,/I}' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ )]*\)NoDamp[,]*@\1\2@I}}' "$icurinfile"
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(CDIIS,@I}}' "$icurinfile"
             #6: Tighter thresholds for linear equation, good for semi-linear cases
             elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -e 'VTL' -e 'VeryTightLin')" ]; then
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(VTL,/I}' "$icurinfile"
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(VTL,@I}}' "$icurinfile"
             #5a: Damping more
             elif [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && { [ -n "$irdamp" ] && [ "$irdamp" -lt 20 ] || [ -z "$irdamp" ]; } && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/18=[^ ]*' -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(NDamp=20,Fermi,/I}' $icurinfile # default: 10
-                [ $wasdamped -lt 10 ] && sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/18=50) IOp(5\/21=5) IOp(5/108=10) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(NDamp=20,Fermi,@I}}' $icurinfile # default: 10
+                [ $wasdamped -lt 10 ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/18=50) IOp(5\/21=5) IOp(5/108=10) !@ }}' "$icurinfile"
             #5c: Damping ultimately
             elif [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && { [ -n "$irdamp" ] && [ "$irdamp" -lt 75 ]; } && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/18=[^ ]*' -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ ]*NDamp\)=[^,)]*/\1=75,/I}' $icurinfile
-                [ $wasdamped -lt 20 ] && sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/18=50) IOp(5\/21=5) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ ]*NDamp\)=[^,)]*@\1\2=75,@I}}' "$icurinfile"
+                [ $wasdamped -lt 20 ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/18=50) IOp(5\/21=5) !@ }}' "$icurinfile"
             #7: Full linear search even if the initial microiteration was successful
             elif [ -z "$(echo "$failedsteproute" | grep -i 'FullLinear')" ] && ($banginghead); then
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(FullLinear,/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(FullLinear,@I}}' "$icurinfile"
             #8: no CDIIS, but Damp
             elif [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && [ -z "$(echo "$failedsteproute" | grep -i '[(,]Damp')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(CDIIS\)\(.*\)!/Damp\2 !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(CDIIS\)\(.*\)!*@\1Damp\3 !@ }}' "$icurinfile"
             #9: FERMI again
             elif [ -n "$(echo "$failedsteproute" | grep -i '[(,]Damp')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\([,(]\)\(Damp\)\(.*\)!/\1Fermi\2 !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\([,(]\)\(Damp\)\(.*\)!*@\1\2Fermi\3 !/ }}' "$icurinfile"
             #10: KyDiag
             elif [ -n "$(echo "$failedsteproute" | grep -i 'NDamp=75')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/16=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ ]*\)NDamp=[^,)]*/\1/I;s/(,/(/;s/,,/,/;s/,)/)/;s/\(.*\)!/\1 IOp(5\/16=2) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ ]*\)NDamp=[^,)]*@\1\2@I;s/(,/(/;s/,,/,/;s/,)/)/;s/\(.*\)!*/\1 IOp(5\/16=2) !/ }}' "$icurinfile"
             #11: Jacobi diagonalization (old, slow but robust)
             elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(5\/16=2)')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/16=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/16=10) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/16=10) !@ }}' "$icurinfile"
             #12: Instead of YQC, using QC from the very beginning (I doubt this is a good solution)
             elif [ -n "$(echo "$failedsteproute" | grep -i 'YQC')" ] && ($banginghead); then
-                sed -i '1,'"$endsolvhere"'{/#/s/YQC/QC/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'YQC@\1QC@I}}' "$icurinfile"
             #13: Instead of QC or else, using DM
             elif [ -n "$(echo "$failedsteproute" | grep -i -e 'YQC' -e 'DIIS')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'scipcm')" ]; then
-                sed -i '1,'"$endsolvhere"'{/#/s/[^,(]*QC,//I;s/CDIIS/DM/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'[^,(]*QC,@\1@I;s/CDIIS/DM/I}}' "$icurinfile"
             fi
         else # if this is an ROHF/ROKS calculation...
             wasdamped=$(tac $2 | sed -n '1,/Cycle   1  Pass 1/p' | grep -c ' Damp=T')
             irdamp=$(echo "$failedsteproute" | grep -o '[Nn][Dd]amp=[^,)]' | cut -d '=' -f 2)
             #1: Switching to Link 506 instead of L502
             if [ -z "$(echo "$failedsteproute" | grep -i 'Use=L506')" ]; then
-                sed -i '1,'"$endsolvhere"'{/#/s/#[^!]*/& Use=L506/}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'@\1 Use=L506@}}' "$icurinfile"
             #2: Adding Fermi broadening
             elif [ -z "$(echo "$failedsteproute" | grep -i 'Fermi')" ]; then
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(Fermi,/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(Fermi,@I}}' "$icurinfile"
           #      #3: Tightening threshold for switching to the commutator
           #      elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=204')" ]; then
           #          wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-          #          for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-          #          sed -i '/#/{s/#[^!]*/& IOp(5\/22=2043)/I;:a;n;ba}' $icurinfile
+          #          for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+          #          sed -i "$bobieks"'@\1 IOp(5\/22=2043)@I;:a;n;ba}' "$icurinfile"
             #3a: Further tightening threshold for switching to the commutator
             elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=304')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/#[^!]*/& IOp(5\/22=3043) /I}' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'@\1 IOp(5\/22=3043) @I}}' "$icurinfile"
             #3b: Adding an additional job with shifted levels and using it as a new quess
            elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -i -e 'VShift')" ]; then
                copyfirst "$icurinfile"
-               sed -i '1,'"$endsolvhere"'{/#/s/SCF[^)]*/SCF=VShift/I}' "$icurinfile"
+               sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[^)]*@\1SCF=VShift@I}}' "$icurinfile"
             #4: Turning the commutator off altogether and switching to EDIIS, also disabling Fermi
             elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=2[23]')" ]; then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(NoDamp,/I;s/\(SCF[^ ]*\)Fermi[,]*/\1/I}' $icurinfile
-                sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/22=23) !/}' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(NoDamp,@I;s/\(SCF[^ ]*\)Fermi[,]*/\1/I}}' "$icurinfile"
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/22=23) !@}}' "$icurinfile"
             #5: Turning EDIIS off and turning on the commutator but implicitly adding damping
             elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(5\/22=2[23]')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'CDIIS')" ]; then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ ]*\)NoDamp[,]*/\1/I}' $icurinfile
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(CDIIS,/I}' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ ]*\)NoDamp[,]*@\1\2@I}}' "$icurinfile"
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(CDIIS,@I}}' "$icurinfile"
             #6: Tighter thresholds for linear equation, good for semi-linear cases
             elif [ -z "$(echo "$failedsteproute" | grep -o '[sS][cC][fF][=(][^ ]*' | grep -e 'VTL' -e 'VeryTightLin')" ]; then
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(VTL,/I}' "$icurinfile"
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(VTL,@I}}' "$icurinfile"
             #5a: Damping more
             elif [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && { [ -n "$irdamp" ] && [ "$irdamp" -lt 20 ] || [ -z "$irdamp" ]; } && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/18=[^ ]*' -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(NDamp=20,/I}' $icurinfile # default: 10
-                [ $wasdamped -lt 10 ] && sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/18=50) IOp(5\/21=5) IOp(5/108=10) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(NDamp=20,@I}}' $icurinfile # default: 10
+                [ $wasdamped -lt 10 ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/18=50) IOp(5\/21=5) IOp(5/108=10) !@ }}' "$icurinfile"
             #5c: Damping, damping...
             elif [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && { [ -n "$irdamp" ] && [ "$irdamp" -lt 75 ]; } && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/18=[^ ]*' -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ ]*NDamp\)=[^,)]*/\1=75,/I}' $icurinfile
-                [ $wasdamped -lt 20 ] && sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/18=50) IOp(5\/21=5) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"$bobieks"''"${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ ]*NDamp\)=[^,)]*@\1\2=75,@I}}' "$icurinfile"
+                [ $wasdamped -lt 20 ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(.*\)!*@\1\2 IOp(5\/18=50) IOp(5\/21=5) !@ }}' "$icurinfile"
             #7: Full linear search even if the initial microiteration was successful
             elif [ -z "$(echo "$failedsteproute" | grep -i 'FullLinear')" ] && ($banginghead); then
-                sed -i '1,'"$endsolvhere"'{/#/s/SCF[=(]*/SCF=(FullLinear,/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'SCF[=(]*@\1SCF=(FullLinear,@I}}' "$icurinfile"
             #8: no CDIIS, but Damp
             elif [ -n "$(echo "$failedsteproute" | grep -i 'CDIIS')" ] && [ -z "$(echo "$failedsteproute" | grep -i '[(,]Damp')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(CDIIS\)\(.*\)!/Damp\2 !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(CDIIS\)\(.*\)!*@\1Damp\3 !@ }}' "$icurinfile"
             #9: FERMI again
             elif [ -n "$(echo "$failedsteproute" | grep -i '[(,]Damp')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/22=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\([,(]\)\(Damp\)\(.*\)!/\1Fermi\2 !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\([,(]\)\(Damp\)\(.*\)!*@\1\2Fermi\3 !/ }}' "$icurinfile"
             #10: KyDiag
             elif [ -n "$(echo "$failedsteproute" | grep -i 'NDamp=75')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o '[iI][oO]p[=(]*5\/16=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(SCF[^ ]*\)NDamp=[^,)]*/\1/I;s/(,/(/;s/,,/,/;s/,)/)/;s/\(.*\)!/\1 IOp(5\/16=2) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'\(SCF[^ ]*\)NDamp=[^,)]*@\1\2@I;s/(,/(/;s/,,/,/;s/,)/)/;s/\(.*\)!*/\1 IOp(5\/16=2) !/ }}' "$icurinfile"
             #11: Jacobi diagonalization (old, slow but robust)
             elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(5\/16=2)')" ] && ($banginghead); then
                 wasiopscf="$(echo "$failedsteproute" | grep -o '.*[\!]*' | grep -o -e '[iI][oO]p[=(]*5\/16=[^ ]*' | xargs)"
-                for hik in $wasiopscf; do sed -i '1,/Link1/{/#/s/'"${hik//\//\\/}"' \([^!]*\)!/\1! '"${hik//\//\\/}"' /}' $icurinfile; done
-                sed -i '1,'"$endsolvhere"'{/#/s/\(.*\)!/\1 IOp(5\/16=10) !/ }' $icurinfile
+                for hik in $wasiopscf; do sed -i '1,/--Link1--/{'"${bobieks}${hik//\//\\/}"' \([^!]*\)!*@\1\2! '"${hik//\//\\/}"' @}}' "$icurinfile"; done
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'@\1\2 IOp(5\/16=10) !@ }}' "$icurinfile"
             #12: Instead of everything else, using DM
             elif [ -n "$(echo "$failedsteproute" | grep -i -e 'YQC' -e 'DIIS')" ] && ($banginghead); then
-                sed -i '1,'"$endsolvhere"'{/#/s/CDIIS/DM/I}' $icurinfile
+                sed -i '1,'"$endsolvhere"'{'"$bobieks"'CDIIS@\1DM@I}}' "$icurinfile"
             fi
         fi
-        [ -n "$(sed -n '1,/--Link1/Ip' $icurinfile | grep '#' | grep -i 'SCF[=]*()')" ] && sed -i '1,'"$endsolvhere"'{/#/s/ SCF[=]*()//I}' $icurinfile
-        sed -i '/#/{s/,,/,/g;s/,)/)/g;s/(,/(/g;s/),/)/g}' $icurinfile # I have no idea why the last case occurs
+        [ -n "$(sed -n '1,/--Link1/Ip' $icurinfile | grep '#' | grep -i 'SCF[=]*()')" ] && sed -i '1,'"$endsolvhere"'{'"$bobieks"' SCF[=]*()@\1@I}}' "$icurinfile"
+        sed -i "$bobieks"',,@,@g;s/,)/)/g;s/(,/(/g;s/),/)/g}' $icurinfile # I have no idea why the last case occurs
     fi
 }
 
@@ -1082,12 +1156,12 @@ acc2esolver() {
     curracc2e=$(grep -m 1 '#' $icurinfile | grep -o '[aA]cc2[eE]=[0-9]*')
     if [ -n "$curracc2e" ]; then
         case ${curracc2e:6} in # {0:0} to fool vi parser
-            11) sed -i '1,/#/s/Acc2E=11/Acc2E=12/I' $icurinfile ;;
-            12) sed -i '1,/#/s/Acc2E=12/Acc2E=13/I' $icurinfile ;;
-            13) sed -i '1,/#/s/Acc2E=13/Acc2E=14/I' $icurinfile ;;
+            11) sed -i '1,'"$bobieks"'Acc2E=11@Acc2E=12@I}' "$icurinfile";;
+            12) sed -i '1,'"$bobieks"'Acc2E=12@Acc2E=13@I}' "$icurinfile";;
+            13) sed -i '1,'"$bobieks"'Acc2E=13@Acc2E=14@I}' "$icurinfile";;
         esac
     else
-        sed -i '1,/#/s/#[^ ]*/& Int=(Acc2E=11)/' $icurinfile # Increasing two-electron inegral accuracy may help
+        sed -i '1,'"$bobieks"'@\1 Int=(Acc2E=11)@}' $icurinfile # Increasing two-electron inegral accuracy may help
     fi
 }
 
@@ -1104,12 +1178,13 @@ getgeomjob(){
                 ramkudrov="$(echo "$ramkudrov" | sed '1,/Entering Link 1/d')"
                 atomlistr="$(echo "$nowkudrov" | sed -n '/Symbolic Z-matrix:\|Structure from the checkpoint file:/,/GradGradGradGradGradGradGradGrad/p' | sed '/coordinates found in file/d;/Charge =/d;/Symbolic Z-matrix/d;/GradGradGrad/d;/Recover connectivity data/d;/^\s*$/d' | cut -d ' ' -f 2 | cut -d ',' -f 1 | xargs)"
                 geom_addinfo="$(echo "$nowkudrov" | sed -n '/Symbolic Z-matrix:\|Structure from the checkpoint file:/,/GradGradGradGradGradGradGradGrad/p' | sed '/coordinates found in file/d;/Charge =/d;/Symbolic Z-matrix/d;/GradGradGrad/d;/Recover connectivity data/d;/^\s*$/d')"
-                if [ -n "$(echo "$geom_addinfo" | grep ',')" ]; then
+                if [ -n "$(echo "$geom_addinfo" | grep -e ',')" ]; then
                     geom_addinfo=$(while IFS=',' read el fixed x y z add; do echo "$fixed $add" | tr ',' ' '; done  <<< "$(echo "$geom_addinfo")")
                 else
                     geom_addinfo="$(while read el x y z w add; do [ -n "$(echo "$x" | grep -o '^[0-9]\+$' | head -1)" ] && echo "$x $add" || echo "0 $w $add"; done  <<< "$(echo "$geom_addinfo")")"
                 fi
 
+                [ -z "$atomlistr" ] && break
                 [ "$atomlistr" != "$atomlist" ] && break || njrk=$((njrk-1))
                 [ -n "$(echo "$nowkudrov" | sed -n '1,/Entering Link 1/p' | grep ' Opt')" ] && ajrk="$ajrk $njrk" && echo "$nowkudrov" > "$otkudrov2"_Otk$((njrk2-njrk)).out
             done
@@ -1162,40 +1237,45 @@ geomfromdone() { # actually inserts the geometry from a preselected job in prese
     if [ "$otkudrov" != "${otkudrov%.xyz}" ]; then
         ($debugging) && echo "DEBUG: Using the shifted geometry as the new one..."
         bestgeom="${otkudrov%.xyz}.gem"
-        mv "$otkudrov" "${otkudrov%.xyz}.gem"
-        otkudrov="${otkudrov%.xyz}.gem"
+        mv "$otkudrov" "$bestgeom"
+        otkudrov="$bestgeom"
         sed -i '1,2d' "$otkudrov"
-        >> "$otkudrov"
-        [ -z "$(sed -n '1,/--Link1--/I{/#/p}' $icurinfile | grep -i 'IOp(1/11=2)')" ] && sed -i '1,/--Link1--/I{/#/s/[^!]*/& IOp(1\/11=2)/}' $icurinfile
+        echo "" >> "$otkudrov"
+        [ -z "$(sed -n '1,/--Link1--/I{'"$bobiek"'p}}' $icurinfile | grep -i 'IOp(1/11=2)')" ] && sed -i '1,/--Link1--/I{'"$bobieks"'[^!]*@\1 IOp(1\/11=2)@}}' "$icurinfile"
         ##### sed -i '1,/--Link1--/I{s/CalcAll/&,MaxCycles='"$calcfcevery"',MaxStep=1/I;}' $icurinfile # shall be lifted in tmp2; this allows to make the Stable=Opt guess
     else
         ($debugging) && echo "DEBUG: best step to use is $beststep within the output file $otkudrov"
-        [ $njobbs2 -eq 1 ] && bestgeom_o=$(findmingeom -s $beststep $otkudrov 2>&1) || bestgeom_o=$(findmingeom -j $njobbs2 -s $beststep $otkudrov 2>&1)
+        bestgeom_o=$(findmingeom -j $njobbs2 -s $beststep $otkudrov 2>&1)
         bestgeom=$(echo "$bestgeom_o" | grep -i "to Unix format[ ]*\.\.\." | xargs | cut -d ' ' -f 4) # sometimes Unix, sometimes UNIX; sometimes there is (?) a space and sometimes (definitely) not
         ($debugging) && echo -e "DEBUG: output of findmingeom is:\n$bestgeom_o"
         #($debugging) && echo "DEBUG: Contents of tmp file are:" && less tmp.geomfile.foo.$HOSTNAME
-        sed -i '1,/--Link1--/I{/#/s/IOp(1\/11=2)//}' "$icurinfile" # because it tends to abort the job because of some tiny transrotary imaginary frequency; if we do not use a shifted geometry, it means we have no real saddle point and IOp(1\/11=2 is just giving us hiccups
+        sed -i '1,/--Link1--/I{'"$bobieks"'IOp(1\/11=2)@\1@}}' "$icurinfile" # because it tends to abort the job because of some tiny transrotary imaginary frequency; if we do not use a shifted geometry, it means we have no real saddle point and IOp(1\/11=2 is just giving us hiccups
     fi
-    sed -n '1,/#/p' $icurinfile >> tmp.geomfile.foo.$HOSTNAME
+    sed -n '1,'"$bobiek"'p}' $icurinfile >> tmp.geomfile.foo.$HOSTNAME
     #($debugging) && echo "DEBUG: Contents of tmp file are:" && less tmp.geomfile.foo.$HOSTNAME
 # This is done in two commands because it is impossible to reliably match the title or Ch/Mult line
-    #sed -n '1,/--Link1--/I { /#/ {n; N; N; N; p} }' $icurinfile >> tmp.geomfile.foo.$HOSTNAME; >> tmp.geomfile.foo.$HOSTNAME
-    #sed -i '1,/--Link1--/I{ s/ Geom[=(]*Check//I; s/CalcAll/CalcAll,MaxStep=1/I}' $icurinfile
-    sed -n '1,/--Link1--/I { /#/ {:utka; n; p; /#/b utka; n; N; N; p} }' $icurinfile >> tmp.geomfile.foo.$HOSTNAME; >> tmp.geomfile.foo.$HOSTNAME
+    #sed -n '1,/--Link1--/I { /#/{'"$bobchesh"' {n; N; N; N; p} }}' $icurinfile >> tmp.geomfile.foo.$HOSTNAME; echo "" >> tmp.geomfile.foo.$HOSTNAME
+    #sed -i '1,/--Link1--/I{ s/ Geom[=(]*Check//I; s/CalcAll/CalcAll,MaxStep=1/I}' "$icurinfile"
+# next line: outputting everything after the first route line, spacer, all title lines, spacer and chmult line; checking before redirect happens on the line which was just printed and is still in the buffer; thus, after the first negative result of the check, we have already printed the spacer; we also do not want to print the spacer line after the Route, as bobchesh generates the spacer already; also, before 02.09.2026 there was an error in printing the spacer after the title line twice
+    sed -n '1,/--Link1--/I { /#/ {:utka; n; /#/b utka; :kadka; n; p; /^ *$/!b kadka; n; p} }' $icurinfile >> tmp.geomfile.foo.$HOSTNAME; # seems to be an error to add a line: echo "" >> tmp.geomfile.foo.$HOSTNAME
     sed -i 's/ Geom=Check//; s/ Guess[=(]\+\([^ ]*\)Read\([^ ]*\)/ Guess=(\1\2/g;s/ Guess=([)]*\( .*\)/\1/;s/ Guess=([)]*$//; s/,,/,/g;s/,)/)/g;s/(,/(/g' tmp.geomfile.foo.$HOSTNAME
+    #while [ -z "$(grep -ie ' Opt' tmp.geomfile.foo.$HOSTNAME)" ]; do
+    #    sed -i '/^ *#/s@ Freq@ Opt
     #($debugging) && echo "DEBUG: Contents of tmp file are:" && less tmp.geomfile.foo.$HOSTNAME
-    # old way is: sed -n '1,/--Link1--/I { /#/ {n; N; N; N; p} }' $icurinfile >> tmp.geomfile.foo.$HOSTNAME; >> tmp.geomfile.foo.$HOSTNAME
+    # old way is: sed -n '1,/--Link1--/I { /#/{'"$bobchesh"' {n; N; N; N; p} }}' $icurinfile >> tmp.geomfile.foo.$HOSTNAME; echo "" >> tmp.geomfile.foo.$HOSTNAME
     ($debugging) && echo "DEBUG: best geometry file is $bestgeom"
     cp tmp.geomfile.foo.$HOSTNAME tmp2.geomfile.foo.$HOSTNAME
     if [ -z "$(echo "$failedsteproute" | grep -i 'Geom[=(]*Check')" ] && [ $(wc -l < "$bestgeom") -lt 3 ] && [ -n "$(head -1 "$bestgeom" | grep AT)" ] && [ "$otkudrov" == "${otkudrov%.gem}" ]; then
         [ $njobbs2 -eq 1 ] && bestgeom=$(findmingeom -is $beststep $otkudrov 2>&1 | grep "to UNIX format \.\.\." | xargs -0 | cut -d ' ' -f 4) || bestgeom=$(findmingeom -ij $njobbs2 -s $beststep $otkudrov 2>&1 | grep "to UNIX format \.\.\." | xargs -0 | cut -d ' ' -f 4)
     fi
-    prev_otkudrov="$otkudrov"; prev_otkujob="$otkujob"
-    getprevgeom "$otkudrov" "haha" "addinfo"
-    otkudrov="$prev_otkudrov"; otkujob="$prev_otkujob"
+    if [ "$otkudrov" != "${otkudrov%.gem}" ]; then
+        prev_otkudrov="$otkudrov"; prev_otkujob="$otkujob"
+        getprevgeom "$otkudrov" "haha" "addinfo"
+        otkudrov="$prev_otkudrov"; otkujob="$prev_otkujob"
+    fi
 
     if [ "$otkudrov" == "${otkudrov%.gem}" ] && { [ $(wc -l < "$bestgeom") -lt 2 ] || [ ! -f "$bestgeom" ]; }; then
-        tac tmp.geomfile.foo.$HOSTNAME | sed '1,/Link1/{/#/s/#[^!]*/& Geom=(Check,Step='"$beststep"')/}' | tac > tmp.geomfile.foo.$HOSTNAME
+        tac tmp.geomfile.foo.$HOSTNAME | sed '1,/--Link1--/{'"$bobieks"'@\1 Geom=(Check,Step='"$beststep"')@}}' | tac > tmp.geomfile.foo.$HOSTNAME
     elif [ "$otkudrov" != "${otkudrov%.gem}" ] && { [ $(wc -l < "$bestgeom") -lt 3 ] || [ ! -f "$bestgeom" ]; }; then
         echo "Could not read the new geometry!"
         return 7
@@ -1227,32 +1307,39 @@ geomfromdone() { # actually inserts the geometry from a preselected job in prese
         garbg=$(echo "$garbg"; echo "$garbgf" | sed -n '1,/--Link1--/Ip')
     done
     #echo >> tmp.geomfile.foo.$HOSTNAME
-    if [ -z "$(echo "$garbg" | grep -i 'stable=opt')" ] || [ -z "$(echo "$garbg" | grep -i 'calcall')" ]; then
+    if (! $nocalcall) && ( [ -z "$(echo "$garbg" | grep -i 'stable=opt')" ] || [ -z "$(echo "$garbg" | grep -i -e 'calcall' -e 'freq')" ]) && [ -z "$(echo "$garbg" | grep -i -e '^[^!]* opt[^!]* td[^ ]*' -e '^[^!]* td[^ ]*[^!]* opt')" ]; then
         echo "--Link1--"  >> tmp.geomfile.foo.$HOSTNAME
         ($debugging) && echo "DEBUG: Contents of tmp file are:" && { cat tmp.geomfile.foo.$HOSTNAME | sed 's/^/--> /'; }
-        cat tmp2.geomfile.foo.$HOSTNAME | sed '/#/{s/ Guess[=(][^ ]*//;s/^[^!]*/& Geom=Check Guess=Read/;s/MaxCycles=5//;s/ Opt[=(]*[^ ]*/ Stable=Opt/}' >> tmp.geomfile.foo.$HOSTNAME
+        cat tmp2.geomfile.foo.$HOSTNAME | sed "$bobieks"' Guess[=(][^ ]*@\1@;s/^[^!]*/& Geom=Check Guess=Read/;s/MaxCycles=5//;s/ Opt[=(]*[^ ]*/ Stable=Opt/}' >> tmp.geomfile.foo.$HOSTNAME
         sed -i '/ Stable=Opt/,${/Now the test for imaginary frequencies/d}' tmp.geomfile.foo.$HOSTNAME
+        echo >> tmp.geomfile.foo.$HOSTNAME
         echo "--Link1--"  >> tmp.geomfile.foo.$HOSTNAME
         echo >> tmp.geomfile.foo.$HOSTNAME
         sed -i '/Now the test for imaginary frequencies/{x;s/.*//;x;N;/^$/d}' "tmp.geomfile.foo.$HOSTNAME"
         # the reason I am still adding CalcAll even if the failed job already had CalcAll is because of Stable=Opt job in between them
-        cat tmp2.geomfile.foo.$HOSTNAME | sed '/#/{s/ Guess[=(][^ ]*//Ig;s/ Geom=Check//Ig;s/^[^!]*/& Geom=Check Guess=Read/;s/CalcFC//Ig;s/ReadFC//Ig;s/CalcAll//Ig;s/ Opt[=(]*\([^ !]*\)/ Opt=(CalcAll,\1)/;s/MaxCycles=[0-9]\+//Ig;s/,,/,/g;s/,)/)/g;s/(,/(/g;s/),/,/g;s/))/)/g}' >> tmp.geomfile.foo.$HOSTNAME
+        cat tmp2.geomfile.foo.$HOSTNAME | sed "$bobieks"' Guess[=(][^ ]*@\1@Ig;s/ Geom=Check//Ig;s/^[^!]*/& Geom=Check Guess=Read/;s/CalcFC//Ig;s/ReadFC//Ig;s/CalcAll//Ig;s/ Opt[=(]*\([^ !]*\)/ Opt=(CalcAll,\1)/;/NoRaman/I!s@CalcAll@&,NoRaman@;s/MaxCycles=[0-9]\+//Ig;s/,,/,/g;s/,)/)/g;s/(,/(/g;s/),/,/g;s/))/)/g}' >> tmp.geomfile.foo.$HOSTNAME
         #echo  >> tmp.geomfile.foo.$HOSTNAME
+    elif (! $nocalcall) && [ -z "$(echo "$garbg" | grep -i 'stable=opt')" ] && [ -n "$(echo "$garbg" | grep -i -e 'freq')" ] && [ -z "$(echo "$garbg" | grep -i -e '[^!]* opt')" ]; then
+        sed -i 's@Freq[^ !]*@Opt &@' tmp.geomfile.foo.$HOSTNAME
     fi
     unset garbg garbgf
     sed -n '/--Link1--/I,$p' "$icurinfile"  >> tmp.geomfile.foo.$HOSTNAME
     #sed -n '1,/--Link1--/I { /#/ {N;N;N;N;:utka n; s/\t/ /;/^[ ]*[A-Z][a-z]*[ ]*/b utka; p; n; :shutka p; n; b shutka } }' $icurinfile  >> tmp.geomfile.foo.$HOSTNAME
     #sed '1,/--Link1--/Id' $icurinfile  >> tmp.geomfile.foo
     ($debugging) && echo "DEBUG: Contents of tmp file are:" && { cat tmp.geomfile.foo.$HOSTNAME | sed 's/^/--> /'; }
-    rm $icurinfile; mv tmp.geomfile.foo.$HOSTNAME $icurinfile
+    rm "$icurinfile"; mv tmp.geomfile.foo.$HOSTNAME "$icurinfile"
     rm tmp2.geomfile.foo.$HOSTNAME
     export icurinfile beststep otkudrov otkudrov2
 }
 
-geomsolver() { # TODO: taking geometry off the saddle point by using forces and force constants found in the out file
-# also TODO: finding the direction in which oscillations proceed and distorting the molecule to take it off the saddle point
+geomsolver() { # TODO: taking geometry off the saddle point by using forces and force constants found in the out file (partially #DONE)
+# also TODO: finding the direction in which oscillations proceed and distorting the molecule to take it off the ridge (find last displacement, compute perpendicular vector and displace?)
+    ( $debugging ) && echo -e "DEBUG: Argument 1 (not used): $1\nArgument 2 (otkudrov): $2\nArgument 3 (solvegeom): $3"
     njobbs=$(grep -c 'Normal termination' $2)
     njobbs2=$(grep -c 'Entering Link 1' $2)
+    ifhaveopt="$(sarakstu2 $2 | grep -e '^ *#' | sed -n "$njobbs2"'p' | grep ' Opt')"
+    didihaveopt="$(sarakstu2 $2 | grep -e '^ *#' | sed -n "$njobbs"'p')"
+    [ -z "$ifhaveopt" ] && [ -n "$(echo "$didihaveopt" | grep ' Opt')" ] && echo "GeomSolver: Opt SHALL be taken from a previous job..."
     solvegeom=$3
     otkudrov="$2"
     export atomlist="$(tac "$2" | sed -n '1,/Entering Link 1/p' | tac | sed -n '/Symbolic Z-matrix:\|Structure from the checkpoint file:/,/GradGradGradGradGradGradGradGrad/p' | sed '/coordinates found in file/d;/Charge =/d;/Symbolic Z-matrix/d;/GradGradGrad/d;/Recover connectivity data/d;/^\s*$/d' | cut -d ' ' -f 2 | cut -d ',' -f 1 | xargs)"
@@ -1263,6 +1350,7 @@ geomsolver() { # TODO: taking geometry off the saddle point by using forces and 
             echo "DEBUG: now we have the following temp files:"
             ls ${otkudrov%.out}_Otk*out
             echo "==tf==tf==tf==tf==tf==tf==tf==tf==tf==tf=="
+            echo "DEBUG END"
         fi
         allkudrovsss=($(ls ${otkudrov%.out}_Otk*out))
         if [ ${#allkudrovsss[@]} -gt 0 ]; then
@@ -1274,6 +1362,7 @@ geomsolver() { # TODO: taking geometry off the saddle point by using forces and 
             echo "DEBUG: the output of findminstep is:"
             echo "$findminstep_o"
             echo "+++++++=======+++++++=======+++++++"
+            echo "DEBUG END"
         fi
         beststep=$(echo "$findminstep_o" | grep "Recommended step is" | tail -1 | cut -d ' ' -f 6)
         bestjob=$(($(echo "$findminstep_o" | grep "Recommended step is" | tail -1 | cut -d ' ' -f 10)-1))
@@ -1299,6 +1388,7 @@ geomsolver() { # TODO: taking geometry off the saddle point by using forces and 
             if ($debugging); then
                 echo "DEBUG: now we have the following temp files:"
                 ls ${otkudrov%.out}_Otk*out
+                echo "DEBUG END"
             fi
             [ -f "$otkudrov" ] && otkudrovx="$otkudrov" || otkudrovx="$(echo ${otkudrov%.out}_Otk*out | cut -d ' ' -f 1)"
             njobbs=$(grep -c 'Normal termination' $otkudrovx)
@@ -1310,6 +1400,7 @@ geomsolver() { # TODO: taking geometry off the saddle point by using forces and 
                 echo "DEBUG: the output of findminstep is:"
                 echo "$findminstep_o"
                 echo "+++++++=======+++++++=======+++++++"
+                echo "DEBUG END"
             fi
             beststep=0; bestjob=1
             beststep=$(echo "$findminstep_o" | grep "Recommended step is" | tail -1 | cut -d ' ' -f 6)
@@ -1324,23 +1415,24 @@ geomsolver() { # TODO: taking geometry off the saddle point by using forces and 
     done # if there was no best step in the last job
     if [ ${#allkudrovsss[@]} -gt 0 ]; then
         if ($debugging); then
-            echo "gg.gg.gg. Starting geomfromdone to get the right geometry for the new input..."
+            echo "DEBUG: gg.gg.gg. Starting geomfromdone to get the right geometry for the new input..."
             [ -z "$icurinfile" ] && echo "No input file! Geometry solving impossible."
             [ -z "$bestjobf" ] && bestjobf="$otkudrov" && echo "No output file! Subst. with the last output file."
             { [ -z "$beststep" ] || [ $beststep -eq 0 ]; } && beststep=$(tac "$bestjobf" | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') && echo "No best step known! Will use the last one."
+            echo "DEBUG END"
         fi
         geomfromdone $icurinfile "$bestjobf" 1 $(grep -c 'Normal term' "$bestjobf") $beststep $debugging
-        ($debugging) && echo "gg.gg.gg. Terminated geomfromdone."
+        ($debugging) && echo "DEBUG: gg.gg.gg. Terminated geomfromdone."
         rm ${firstcurinfile%.gjf}*_Otk[0-9]*out
     fi
-    ($debugging) && echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->" &&  echo "DEBUG: Contents of the new input file after replacing the geometry by geomsolver are:" && { cat $icurinfile | sed 's/^/---> /'; echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->"; }
+    ($debugging) && echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->" &&  echo "DEBUG: Contents of the new input file after replacing the geometry by geomsolver are:" && { cat $icurinfile | sed 's/^/---> /'; echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->"; } && echo "DEBUG END"
     if [ $solvegeom -gt 4 ]; then
-        [ -n "$(echo "$failedsteproute" | grep -i ' Opt ')" ] && sed -i '1,/#/s/ Opt / Opt=() /I' $icurinfile || { [ -z "$(echo "$failedsteproute" | grep -i ' Opt[=]*(')" ] && sed -i '1,/#/s/ Opt=\([^ ]*\)/ Opt=(\1)/I' $icurinfile; } # gives every Opt keyword =()
+        [ -n "$(echo "$failedsteproute" | grep -i ' Opt ')" ] && sed -i '1,'"$bobieks"' Opt @ Opt=() @I}' $icurinfile || { [ -z "$(echo "$failedsteproute" | grep -i ' Opt[=]*(')" ] && sed -i '1,'"$bobieks"' Opt=\([^ ]*\)@\1 Opt=(\2)@I}' "$icurinfile"; } # gives every Opt keyword =()
         failedsteproute=$(ifind $icurinfile "#")
-        if [ -z "$(echo "$failedsteproute" | grep -i -e 'scipcm' -e 'LC-wPBE' -e 'HSE' -e 'PBEh' -e 'PKZB')" ] && [ -z "$(echo "$failedsteproute" | grep -o ' [oO]pt[^ ]\+' | grep -i -e 'CalcAll' -e 'CalcFC[^ ]*MaxCycles=')" ]; then
+        if (! $nocalcall) && [ -z "$(echo "$failedsteproute" | grep -i -e 'scipcm' -e 'LC-wPBE' -e 'HSE' -e 'PBEh' -e 'PKZB')" ] && [ -z "$(echo "$failedsteproute" | grep -o ' [oO]pt[^ ]\+' | grep -i -e 'CalcAll' -e 'CalcFC[^ ]*MaxCycles=')" ]; then
             [ -z "$calcfcevery" ] && calcfcevery=20
-            sed -i '1,/--Link1--/I{/#/s/CalcAll/CalcFC,MaxCycles='"$calcfcevery"',MaxStep=1/I;}' $icurinfile
-            [ -z "$(sed -n '1,/--Link1--/I{/#/p}' "$icurinfile" | grep 'CalcFC,MaxCycles=')" ] && sed -i '1,/--Link1--/I{/#/s/ Opt[(=]*/&=(CalcFC,MaxCycles='"$calcfcevery"',MaxStep=1,/I;/#/s/ Opt[=(]\+/ Opt=(/g;s/, / /g}' $icurinfile
+            sed -i '1,/--Link1--/I{'"$bobieks"'CalcAll@\1CalcFC,MaxCycles='"$calcfcevery"',MaxStep=1@I;}}' "$icurinfile"
+            [ -z "$(sed -n '1,/--Link1--/I{'"$bobiek"'p}}' "$icurinfile" | grep 'CalcFC,MaxCycles=')" ] && sed -i '1,/--Link1--/I{'"$bobieks"' Opt[(=]*@\1=(CalcFC,MaxCycles='"$calcfcevery"',MaxStep=1,@I};'"$bobieks"' Opt[=(]\+@\1 Opt=(@g;s/, / /g}}' "$icurinfile"
             if [ -n "$(sed -n '1,/--Link1--/Ip' "$icurinfile" | grep lutil)" ]; then
                 nnnlutil=$(sed -n '1,/--Link1--/Ip' "$icurinfile" | grep -n lutil | cut -d : -f 1)
             else
@@ -1351,50 +1443,64 @@ geomsolver() { # TODO: taking geometry off the saddle point by using forces and 
             else
                 sed -i ${nnnlutil}"i !lutil iterlutil anfreqevery" "$icurinfile"
             fi
-        elif [ -z "$(echo "$failedsteproute" | grep -i -e 'scipcm' -e 'LC-wPBE' -e 'HSE' -e 'PBEh' -e 'PKZB')" ] && [ -z "$(echo "$failedsteproute" | grep -o ' [oO]pt[^ ]*' | grep -i 'CalcAll')" ]; then
-            sed -i '1,/--Link1--/I{/#/s/CalcFC/CalcAll/I;/iterlutil anfreqevery/d}' "$icurinfile"
-        elif [ -n "$(echo "$failedsteproute" | sed -n 's/\!.*//' | grep -o ' [oO]pt[^ ]*\( Freq[^ !]*\)*' | grep -ie 'Calc' -e 'Freq')" ] && [ -n "$(grep 'No analytic 2nd derivatives for this method' $2)" ]; then
-            sed -i '1,/--Link1--/I{/#/{s/CalcFC//I;s/ Freq[^ !]*//I;s/CalcAll//I;s/,)/)/;s/(,/(/;s/,,/,/;s/.*/& ! Opt=CalcFC/;:a;n;ba}}' $icurinfile
-            sed -i '1,/--Link1--/I{s/Opt[=]*(/Opt=(MaxStep=1,RFO,/I;/iterlutil anfreqevery/d};s/,)/)/' $icurinfile
-        # the next solutions correspond to Opt=CalcFC/CalcAll case (or when it is impossible to Calc)
+        elif (! $nocalcall) && [ -z "$(echo "$failedsteproute" | grep -i -e 'scipcm' -e 'LC-wPBE' -e 'HSE' -e 'PBEh' -e 'PKZB')" ] && [ -z "$(echo "$failedsteproute" | grep -o ' [oO]pt[^ ]*' | grep -i 'CalcAll')" ]; then
+            sed -i '1,/--Link1--/I{'"$bobieks"'CalcFC@\1CalcAll@I;/iterlutil anfreqevery/d}}' "$icurinfile"
+        elif (! $nocalcall) && [ -n "$(echo "$failedsteproute" | sed -n 's/\!.*//' | grep -o ' [oO]pt[^ ]*\( Freq[^ !]*\)*' | grep -ie 'Calc' -e 'Freq')" ] && [ -n "$(grep 'No analytic 2nd derivatives for this method' $2)" ]; then
+            sed -i '1,/--Link1--/I{'"$bobieks"'CalcFC@\1@I;s/ Freq[^ !]*//I;s/CalcAll//I;s/,)/)/;s/(,/(/;s/,,/,/;s/.*/& ! Opt=CalcFC/;:a;n;ba}}' "$icurinfile"
+            sed -i '1,/--Link1--/I{s/Opt[=]*(/Opt=(MaxStep=1,RFO,/I;/iterlutil anfreqevery/d};s/,)/)/' "$icurinfile"
+        # ####### the next solutions correspond to Opt=CalcFC/CalcAll case (or when it is impossible to Calc) #######
+        elif [ -n "$(echo "$failedsteproute" | sed -n 's/\!.*//' | grep -o ' [oO]pt[^ ]*\( Freq[^ !]*\)*' | grep -ie 'Calc' -e 'Freq')" ]; then # ambitious plan to insert a job with PBE0 force constants
+            [ -z "$(grep -e '--Link1--' "$icurinfile")" ] && { echo "" >> "$icurinfile"; echo "--Link1--" >> "$icurinfile"; echo "" >> "$icurinfile"; }
+            [ -f "/tmp/addlowfreqjob.${HOSTNAME}_$$" ] && rm /tmp/addlowfreqjob.${HOSTNAME}_$$
+            sed -n '1,/--Link1--/p' $icurinfile >> /tmp/addlowfreqjob.${HOSTNAME}_$$; echo "" >> /tmp/addlowfreqjob.${HOSTNAME}_$$
+            sed -i '1,/--Link1--/I{'"$bobiek"'s@#[^!]*@#T PBE1PBE/6-31G(d) Freq(NoRaman)@}}' /tmp/addlowfreqjob.${HOSTNAME}_$$
+            sed -n '1,/^ *[-]*[0-9]\+ \+[0-9]\+$/p' $icurinfile | sed "$bobieks"'calcfc@\1@I;s/calcall//I;s/noraman//I;s/ freq[^ ]*//I;s/Opt[=]*(/Opt=(ReadFC/I}' >> /tmp/addlowfreqjob.${HOSTNAME}_$$
+            aftergeom="$(grep -n -e '^ *[-]*[0-9]\+ \+[0-9]\+$' $icurinfile | head -1 | cut -d : -f 1)"
+            if [ -n "$(sed -n "$((aftergeom+1))"'p' $icurinfile | sed 's@[ \t]*@@g')" ];then
+                natomss=$(grep -m 1 -e 'NAtoms=' "$2" | gawk '{print $2}')
+                aftergeom=$((aftergeom+natomss))
+            fi
+            sed -n "$((aftergeom+1))"',$p' $icurinfile >> /tmp/addlowfreqjob.${HOSTNAME}_$$
+            rm "$icurinfile"
+            mv /tmp/addlowfreqjob.${HOSTNAME}_$$ "$icurinfile"
         elif [ -z "$(echo "$failedsteproute" | grep -i 'RFO')" ] && [ -z "$(echo "$failedsteproute" | grep -i 'Cartesian')" ];then # default was GEDIIS
-            sed -i '1,/--Link1--/I{/#/s/Opt[=]*(/Opt=(MaxStep=1,RFO,/I;/iterlutil anfreqevery/d};s/,)/)/' $icurinfile
+            sed -i '1,/--Link1--/I{'"$bobieks"'Opt[=]*(@\1Opt=(MaxStep=1,RFO,@I;/iterlutil anfreqevery/d};s/,)/)/}' "$icurinfile"
         elif [ -z "$(echo "$failedsteproute" | grep -i 'Cartesian')" ];then
-            sed -i '1,/#/s/NoRaman/&,Cartesian/I' $icurinfile
+            sed -i '1,'"$bobieks"'\(NoRaman\)/\1\2,Cartesian@I}' "$icurinfile"
         elif [ -n "$(echo "$failedsteproute" | grep -i 'RFO')" ];then # back to the default GEDIIS but Cartesian
-            sed -i '1,/--Link1--/I{/#/s/Opt[=]*(/Opt=(MaxStep=1,RFO,/I;s/,)/)/}' $icurinfile
+            sed -i '1,/--Link1--/I{'"$bobieks"'Opt[=]*(@Opt=(MaxStep=1,RFO,@I;s/,)/)/}}' "$icurinfile"
         elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(1/19')" ];then
-            sed -i '1,/--Link1--/I{/#/{s/ IOp(1\/10=9)//I;s/#[^!]*/& IOp(1\/19=10) !IOp(1\/10=9)/I;:a;n;ba}}' $icurinfile # GDIIS+linear
+            sed -i '1,/--Link1--/I{'"$bobieks"' IOp(1\/10=9)@\1@I;s/#[^!]*/& IOp(1\/19=10) !IOp(1\/10=9)/I;:a;n;ba}}' $icurinfile # GDIIS+linear
         elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(1/19=10)')" ];then
-            sed -i '1,/--Link1--/I{/#/{s/IOp(1\/19=10)/IOp(1\/19=8)/I;s/.*/& !IOp(1\/19=10)/;:a;n;ba}}' $icurinfile # NR+linear
+            sed -i '1,/--Link1--/I{'"$bobieks"'IOp(1\/19=10)@\1IOp(1\/19=8)@I;s/.*/& !IOp(1\/19=10)/;:a;n;ba}}' $icurinfile # NR+linear
         elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(1/19=8)')" ];then
-            sed -i '1,/--Link1--/I{/#/{s/IOp(1\/19=8)/IOp(1\/19=3)/I;s/#[^!]*/& !IOp(1\/19=8)/;:a;n;ba}}' $icurinfile # SD+linear
+            sed -i '1,/--Link1--/I{'"$bobieks"'IOp(1\/19=8)@\1IOp(1\/19=3)@I;s/#[^!]*/& !IOp(1\/19=8)/;:a;n;ba}}' $icurinfile # SD+linear
         elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(1/13')" ];then
-            sed -i '1,/--Link1--/I{/#/{s/\(IOp(1\/19=[^)]*)\)\(.*\)/\2 ! \1/I;s/#[^!]*/& IOp(1\/13=7)/;:a;n;ba}}' $icurinfile
+            sed -i '1,/--Link1--/I{'"$bobieks"'\(IOp(1\/19=[^)]*)\)\(.*\)@\1\3 ! \2@I;s/#[^!]*/& IOp(1\/13=7)/;:a;n;ba}}' "$icurinfile"
         elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(1/13=7)')" ];then
-            sed -i '1,/--Link1--/I{/#/{s/IOp(1\/13=7)/IOp(1\/13=5)/I;s/#[^!]*/& !IOp(1\/13=7)/;:a;n;ba}}' $icurinfile
+            sed -i '1,/--Link1--/I{'"$bobieks"'IOp(1\/13=7)@\1IOp(1\/13=5)@I;s/#[^!]*/& !IOp(1\/13=7)/;:a;n;ba}}' "$icurinfile"
         # Nota bene: IOp(1\/10=9) does not work for L103 (Berny)
         elif [ -z "$(echo "$failedsteproute" | grep -i 'IOp(1/10=9')" ] && [ -n "$(echo "$failedsteproute" | grep -i 'CalcAll')" ];then
-            sed -i '1,/--Link1--/I{/#/{s/,RFO//I;s/#[^!]*/& IOp(1\/10=9)/I;:a;n;ba}}' $icurinfile # GenFC from MM
+            sed -i '1,/--Link1--/I{'"$bobieks"',RFO@\1@I;s/#[^!]*/& IOp(1\/10=9)/I;:a;n;ba}}' $icurinfile # GenFC from MM
         elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(1/13=5)')" ] && [ -n "$(echo "$failedsteproute" | grep -i 'CalcAll')" ];then # does not work for L103 (Berny)
-            sed -i '1,/--Link1--/I{/#/{s/IOp(1\/13=5)/IOp(1\/13=3)/I;s/#[^!]*/& !IOp(1\/13=5)/;:a;n;ba}}' $icurinfile
+            sed -i '1,/--Link1--/I{'"$bobieks"'IOp(1\/13=5)@\1IOp(1\/13=3)@I;s/#[^!]*/& !IOp(1\/13=5)/;:a;n;ba}}' "$icurinfile"
         elif [ -n "$(echo "$failedsteproute" | grep -i 'IOp(1/13=3)')" ] && [ -n "$(echo "$failedsteproute" | grep -i 'CalcAll')" ];then # does not work for L103 (Berny)
-            sed -i '1,/--Link1--/I{/#/{s/IOp(1\/13=3)/IOp(1\/13=1)/I;s/#[^!]*/& !IOp(1\/13=3)/;:a;n;ba}}' $icurinfile
+            sed -i '1,/--Link1--/I{'"$bobieks"'IOp(1\/13=3)@\1IOp(1\/13=1)@I;s/#[^!]*/& !IOp(1\/13=3)/;:a;n;ba}}' "$icurinfile"
         fi
     fi
     [ $solvegeom -gt 4 ] && echo "Using last good geometry found, possibly with amendments in the Route line..." || echo "Using last good geometry found, without changing the Route line..."
-    sed -i '/#/{s/,,/,/g;s/,)/)/g;s/(,/(/g}' $icurinfile
-    ($debugging) && echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->" && echo "DEBUG: Contents of the new input file ($icurinfile) at the end of geomsolver are:" && { cat $icurinfile | sed 's/^/w--> /'; echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->"; echo "Contents of the next input file are:" && cat $(ls -v ${firstcurinfile%.gjf}*gjf | tail -1) | sed -n '1,/^#.* [Oo]pt/p' | sed 's/^/x--> /'; }
+    sed -i "$bobieks"',,@\1,@g;s/,)/)/g;s/(,/(/g;s/ ,/ /g;s/, / /g;s/,$//;s/=*([, ]*)//g}' $icurinfile # final clean-up of the Route line
+    ($debugging) && echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->" && echo "DEBUG: Contents of the new input file ($icurinfile) at the end of geomsolver are:" && { cat $icurinfile | sed 's/^/w--> /'; echo "-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->-->"; echo "DEBUG: Contents of the next input file are:" && cat $(ls -v ${firstcurinfile%.gjf}*gjf | tail -1) | sed -n '1,/^#.* [Oo]pt/p' | sed 's/^/x--> /'; } && echo "DEBUG END"
 }
 
 rwfsolver() {
-    diskspace $icurinfile
+    diskspace "$icurinfile"
     rwfwork=$(wc -c < $GAUSS_SCRDIR/*.rwf)
     intwork=$(wc -c < $GAUSS_SCRDIR/*.int)
     rwfpub=$(wc -c < $GAUSS_SPRSCRDIR/*.rwf)
     intpub=$(wc -c < $GAUSS_SPRSCRDIR/*.int)
 
-    presentdiskinfo="$(rwf2gjf -bd $icurinfile)"
+    presentdiskinfo="$(rwf2gjf -bd "$icurinfile")"
     isworkrwf=$(echo "$presentdiskinfo" | cut -d ' ' -f 1)
     isworkint=$(echo "$presentdiskinfo" | cut -d ' ' -f 2)
     isworkrwf=${isworkrwf/GB/}; isworkint=${isworkint/GB/}
@@ -1419,9 +1525,9 @@ rwfsolver() {
     ( $regclean ) && getridofdirt $firstcurinfile
     cp $icurinfile $icurinfile.bup
     if [ $intwork -gt $rwfwork ] || [ $intpub -gt $rwfpub ]; then
-        rwf2gjf -i $(((intrwfwork-1)*rwfdkoef)) $icurinfile
+        rwf2gjf -i $(((intrwfwork-1)*rwfdkoef)) "$icurinfile"
     else
-        rwf2gjf -i $(((intrwfwork+1)*rwfdkoef)) $icurinfile
+        rwf2gjf -i $(((intrwfwork+1)*rwfdkoef)) "$icurinfile"
     fi
     echo "Restarting with redistributed disk space..."
     if [ -z "$(diff $icurinfile $icurinfile.bup)" ]; then
@@ -1444,7 +1550,7 @@ rwfsolver() {
             sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
         fi
         until [ -n "$(head -n 1 $icurinfile | grep '%')" ] || [ $(wc -c $icurinfile | cut -f 1 -d ' ') -lt 20 ]; do
-            sed '1 d' -i $icurinfile 
+            sed '1 d' -i "$icurinfile"
         done
         sleep 10; echo "Out of space (moving on) on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
         echo "Disk space redistribution not beneficial, dropping the task..."
@@ -1509,7 +1615,7 @@ generscpcmgjf() { # function generates fallback input file for the SC-PCM jobs, 
     until [ -n "$(echo "$ramfile" | head -n 1 | grep %)" ] || [ -z "$ramfile" ]; do
         ramfile=$(echo "$ramfile" | sed '1 d')
     done # and now it does not have any --Link1-- altogether
-    ramfile=$(echo "$ramfile" | sed '1,/--Link1--/I{/#/{s/\( Guess[^ ]*\)\(Read\|TCheck\)\([^ ]*\)/\1\3/I;s/,,/,/g;s/(,/(/g;s/,)/)/g;s/()//g;s/ Guess[=]*\( \|$\)//}}')
+    ramfile=$(echo "$ramfile" | sed '1,/--Link1--/I{'"$bobieks"'\( Guess[^ ]*\)\(Read\|TCheck\)\([^ ]*\)@\1\3\4@I;s/,,/,/g;s/(,/(/g;s/,)/)/g;s/()//g;s/ Guess[=]*\( \|$\)//}}')
     ramfile=$(echo -e "$ramfile\n\n--Link1--\n") # must have that --Link1-- here after all -- now its non-redunduncy should be guaranteed by reading the NEWLY-MADE job to ramfile2 (instead of generating it once more...)
     ($debugging) && echo "DEBUG: Removed Read/TCheck options for Guess, did not add trailing Link1; size of ramfile is $(wc -c <<< "$ramfile")"
 
@@ -1521,14 +1627,14 @@ generscpcmgjf() { # function generates fallback input file for the SC-PCM jobs, 
             echo "Impossible things are happening (file with scrf=restart contains oldchk Link0 command)..."
             sed '1,/--Link1--/I{s/^\(%OldChk=\).*$/\1'"$activeoldchkf"'/I}' "$icurinfile"
         fi
-        ramfile2=$(echo "ramfile2" | sed '1,/--Link1--/I{/#/{s/\(scrf[^ ]*\)restart/\1/I;s/,,/,/g;s/(,/(/g;s/,)/)/g;}}')
+        ramfile2=$(echo "ramfile2" | sed '1,/--Link1--/I{'"$bobieks"'\(scrf[^ ]*\)restart@\1\2@I;s/,,/,/g;s/(,/(/g;s/,)/)/g;}}')
         echo "Cancelled restarting SCRF within the fallback file..."
     fi
     echo "$ramfile" > $icurinfile2
     echo >> $icurinfile2
     echo "$ramfile2" >> $icurinfile2
     unset ramfile ramfile2
-    ($debugging) && echo "about to return the file..."
+    ($debugging) && echo "DEBUG: about to return the file..."
     newfallbackname="$icurinfile2"
     export newfallbackname
     return 0
@@ -1538,15 +1644,15 @@ scpcmsolver() {
 #    nrdone=$(grep -ce "Normal term" $2); #((totlines--))
 #    icurinfile=${1%.gjf}_$((nrdone+1)).gjf
 #    cp $1 "$icurinfile"
-    ($debugging) && echo "Currently icurinfile is $icurinfile, and nrdone is $nrdone"
-    if [ $(wc -l < $icurinfile) -ge 2 ]; then
+    ($debugging) && echo "DEBUG: Currently icurinfile is $icurinfile, and nrdone is $nrdone"
+    if [ $(wc -l < "$icurinfile") -ge 2 ]; then
         if [ -z "$(sed -n '1,/--Link1--/Ip' "$icurinfile" | grep -i 'scrf[=(]*[^)]*Read')" ]; then # ?!
-            ($debugging) && echo "There was no SCR=Read option (?!), adding it..."
+            ($debugging) && echo "DEBUG: There was no SCR=Read option (?!), adding it..."
             koaizv="$(sed -n '1,/--Link1--/Ip' "$icurinfile" | grep -i 'scrf[=(]*[^)]*solvent=[^)]*,')"
             sed -i '1,/--Link1--/Is/'"$koaizv"'/'"$koaizv"'Read,/I' "$icurinfile"
         fi
         if [ -n "$(sed -n '1,/--Link1--/Ip' "$icurinfile" | grep -i 'noneq')" ]; then
-            ($debugging) && echo "Found the NonEq section within the job which will be modified..."
+            ($debugging) && echo "DEBUG: Found the NonEq section within the job which will be modified..."
             koaizv="$(sed -n '1,/--Link1--/Ip' "$icurinfile" | grep -i -e 'noneq=[^\s]*' -e 'maxextit=[0-9]\+')"
             if [ -n "$(echo "$koaizv" | grep 'MaxExtIt=150')" ] && [ -z "$(echo "$koaizv" | grep 'MaxExtIt=250')" ]; then
                 if [ -z "$(echo "$koaizv" | grep 'MaxExtIt=250')" ]; then
@@ -1561,12 +1667,12 @@ scpcmsolver() {
             if [ -n "$(sed -n '1,/--Link1--/I{/^#/p}' "$icurinfile" | grep -i -e ' charge' -e 'geom[^ ]*connect' -e 'ADMP' -e 'BOMD' -e 'readisotope')" ]; then
                 echo "Adding new additional input section after other additional input sections is not yet implemented, unfortunately."
             else
-                ($debugging) && echo "Added the NonEq section to the job which will be modified..."
-                sed -i '1,/--Link1--/I{/#/{N;N;N;:a;N;/^$/!ba;s/$/\nNonEq=Read MaxExtIt=150\n/}}' "$icurinfile"
+                ($debugging) && echo "DEBUG: Added the NonEq section to the job which will be modified..."
+                sed -i '1,/--Link1--/I{'"$bobiek"'N;N;N;:a;N;/^$/!ba;s/$/\nNonEq=Read MaxExtIt=150\n/}}' "$icurinfile"
                 #sed -i '1,/--Link1--/I{s/Guess[(=]*[^ ]*/Guess=Read/I;/OldChk/Id;s/\(%Chk=\)\([^ ]*\)/%OldChk=\2\n\1\2/I;/%Chk=/s/.chk/_anew.chk/I;}' "$icurinfile" # this is the old and not-working way of restarting SCRF=SC-PCM, but D. Fox told there (was) a bug until G16 
             fi
         fi
-        ($debugging) && echo "About to launch generscpcmgjf..."
+        ($debugging) && echo "DEBUG: About to launch generscpcmgjf..."
         generscpcmgjf "$icurinfile" || { solvescpcm=0; export solvescpcm;}
         if [ -n "$(echo "$GAUSS_EXEDIR" | grep g16)" ]; then
             if [ -z "$(sed -n '1,/--Link1--/Ip' "$icurinfile" | grep -i '^%Chk=')" ]; then
@@ -1578,7 +1684,7 @@ scpcmsolver() {
             else
                 sed -i '1,/--Link1--/I{/^%OldChk/Id}' "$icurinfile"
             fi
-            sed -i '1,/--Link1--/I{/#/{s/scrf[^ ]*externaliteration/&,Restart/I}}' "$icurinfile"
+            sed -i '1,/--Link1--/I{'"$bobieks"'\(scrf[^ ]*externaliteration\)@\1\2,Restart@I}}' "$icurinfile"
             echo "Restarting with the name: $icurinfile..."
             if [ $solvescpcm -lt 3 ]; then
                 echo "Fallbacking will be impossible!"
@@ -1595,8 +1701,8 @@ scpcmsolver() {
         fi
     fi
     icuroutfile="${icurinfile%.gjf}.out"
-    export curinfile=$icurinfile
-    export curoutfile=$icuroutfile
+    export curinfile="$icurinfile"
+    export curoutfile="$icuroutfile"
     ( $regclean ) && getridofdirt $firstcurinfile
 }
 
@@ -1620,7 +1726,7 @@ scpcmsolver_rerun() { # do not worry: this solver ALWAYS uses the fallback file 
     else
 #        nrdone=$(grep -ce "Normal term" $2); #((totlines--))
 #        icurinfile=${1%.gjf}_$((nrdone+1)).gjf
-#        cp $1 $icurinfile
+#        cp $1 "$icurinfile"
         newfallbackname=""
         generscpcmgjf "$icurinfile"
         mv "$newfallbackname" "$icurinfile"
@@ -1642,8 +1748,8 @@ scpcmsolver_rerun() { # do not worry: this solver ALWAYS uses the fallback file 
     mv "$icurinfile.scpcmtmp" "$icurinfile"
 
     echo "Restarting with the fallback file with name: $icurinfile..." # this sub uses basic name for fallbacking; scpcmsolver uses name with "_fbk" added; for now this is to test which way works better (I prefer the way of scpcmsolver)
-    export curinfile=$icurinfile
-    export curoutfile=$icuroutfile
+    export curinfile="$icurinfile"
+    export curoutfile="$icuroutfile"
     ( $regclean ) && getridofdirt $firstcurinfile
 }
 
@@ -1682,7 +1788,7 @@ generategjf() {
     echo "! the next job failed, hence all below was not calculated" >> "$1"
     cat "$icurinfile" >> "$1" # done meddling with the original input file
     until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -eq 0 ]; do
-        sed '1 d' -i $icurinfile
+        sed '1 d' -i "$icurinfile"
     done
     # ((nrdone++)) # henceforth nrdone is the number of FAILED job
     
@@ -1693,7 +1799,7 @@ generategjf() {
 ################ GATHERS SOME INFORMATION ABOUT THE FAILED STEP AND OUTPUTS IT
     failedsteproute=$(ifind $icurinfile "#")
     failedstep=$(ifind $icurinfile ":::")
-    sed -n '/^#/{n;n;n;n;n;:a;p;n;/--Link1--/!ba;:end;n;$!bend}' "$icurinfile" > old.addinput.${mygorgeouspid}.$HOSTNAME
+    sed -n '/^#/{:rustik;n;/#/brustik;n;:gagik;n;/^ *$/!bgagik;n;:nino;n;/^ *$/!bnino;n;:a;p;n;/--Link1--/!ba;:end;n;$!bend}' "$icurinfile" > old.addinput.${mygorgeouspid}.$HOSTNAME
     [ -f "new.addinput.${mygorgeouspid}.$HOSTNAME" ] && rm "new.addinput.${mygorgeouspid}.$HOSTNAME"
     > new.addinput.${mygorgeouspid}.$HOSTNAME 
     [ -n "$(sed -n '1{s/^\s*$//;p}' old.addinput.${mygorgeouspid}.$HOSTNAME)" ] && sed -i '1,/^\s*$/d' old.addinput.${mygorgeouspid}.$HOSTNAME
@@ -1747,7 +1853,7 @@ generategjf() {
 ################ SOME TRIALS TO INCLUDE FAST FREQUENCY CHECK (NEED TO INCLUDE AUTOMATIC CHANGE OF COORDINATES AFTER FINDING OUT THAT WE REACHED A SADDLE POINT)
     # No way to check frequencies with smaller BS: as the difference is about 10 cm-1, it can readily exceed small first freq. of a complex molecule
     #if [ -n "$(tail -10 ${1%_U*}.logg | grep -e 'Something weird' -e 'Not enough disk')" ] && [ -n "$(echo $failedstep | grep 'NoRaman')" ]; then
-    #    sed -n '1,/#/p' $icurinfile > $icurinfile_freqcheck
+    #    sed -n '1,/#/{'"$bobchesh"'p}' $icurinfile > $icurinfile_freqcheck
     #fi
 
 ################ TO REMOVE JOBS WHICH MAY USE CHECKPOINT FILES FROM THE CORRUPTED JOBS (E.G., UNFINISHED GEOMETRY OPTIMIZATIONS WHICH WERE TO BE FOLLOWED BY PROPERTY CALCULATIONS)
@@ -1771,23 +1877,24 @@ generategjf() {
     echo "Solving status: solvescf=$solvescf, solvemcscf=$solvemcscf, solvefmm=$solvefmm, solvecphf=$solvecphf, solvegeom=$solvegeom, solveacc2=$solveacc2, solverwf=$solverwf, solvecav=$solvecav, solvescpcm_redo=$solvescpcm_redo, solvescpcm=$solvescpcm, solveimg=$solveimg."
 
 ################ FAST SOLVER FOR THE CASE OF OPERATOR FORGETTING TO ADD Geom=Check
-    [ -n "$(tail -n 20 $2 | grep "no atoms in this input stru")" ] && [ -z "$(sed -n '1,/--Link1--/Ip' $icurinfile | grep -i 'Geom[=(]*Check')" ] && sed -i '1,/--Link1--/I{/^#/s/.*/& Geom=Check/}' $icurinfile && solvescf=3 # if no solver is active, the job would be skipped
+    [ -n "$(tail -n 20 $2 | grep "no atoms in this input stru")" ] && [ -z "$(sed -n '1,/--Link1--/Ip' $icurinfile | grep -i 'Geom[=(]*Check')" ] && sed -i '1,/--Link1--/I{'"$bobieks"'@\1 Geom=Check@}}' $icurinfile && solvescf=3 # if no solver is active, the job would be skipped
     
 ################ IF NO SOLVER WILL BE USED (THE FAILED JOB IS THEN REMOVED HERE):
     ################################ (otherwise the job may be needed by the solver below)
     for ewald in 1 2; do # this is to fall back to the no-solver case if the resulting route line is the same as the initial route line
        if [ $solvescf -lt 3 ] && [ $solvefmm -lt 3 ] && [ $solvecphf -lt 3 ] && [ $solvegeom -lt 3 ] && [ $solveacc2 -lt 3 ] && [ $solverwf -lt 3 ] && [ $solvecav -lt 3 ] && [ $solvescpcm_redo -lt 3 ] && [ $solvescpcm -lt 3 ] && [ $solveimg -lt 3 ]; then
-           ($debugging) && echo "About to remove the first job..."
+           ($debugging) && echo "DEBUG: About to remove the first job..."
+
            [ -z "$(echo "carefuleness"; tail -7 ${firstcurinfile%.gjf}_failed.gjf 2>/dev/null | grep -i '\-\-Link1\-\-')" ] && [ $(wc -l < "${firstcurinfile%.gjf}_failed.gjf") -gt 5 ] && echo -en "\n--Link1--\n\n" >> ${firstcurinfile%.gjf}_failed.gjf
            if [ $(wc -l < "$2") -gt 7 ] && [ -n "$(tac "$2" | sed -n '1,/Entering Link 1/p' | grep 'Structure from the checkpoint file')" ]; then
-               ($debugging) && echo "Replacing the Geom=Check with actual structure from earlier (while simply removing the failed job)..."
+               ($debugging) && echo "DEBUG: Replacing the Geom=Check with actual structure from earlier (while simply removing the failed job)..."
                errstruct="$(tac "$2" | sed -n '1,/Entering Link 1/p' | tac | sed -n '/Structure from the checkpoint file/,/Recover connectivity data from disk./p' | sed '1,3d' | sed 's/,0,-/  -/;s/,0,/   /;s/,-/  -/g;s/,/   /g;$d' | sed 's/\r//;s/$/\\/')"
-               if [ -z "$(echo "$errstruct" | grep -e 'dumping /fiocom/')" ]; then
+               if [ -z "$(echo "$errstruct" | grep -e 'dumping /fiocom/')" ] && [ -f "${firstcurinfile%.gjf}_failed.gjf" ]; then
                    erstrln=$(grep -n '^[ ]*#' ${firstcurinfile%.gjf}_failed.gjf | tail -1 | cut -d ':' -f 1) # thanks terdon unix.stackexchange.com/questions/112159
                    erstrln=$((erstrln+4))
                    sed -i "$erstrln"' a'"$errstruct" "${firstcurinfile%.gjf}_failed.gjf"
                    sed -i 's/\\$//' "${firstcurinfile%.gjf}_failed.gjf"
-                   vecaisgess=$(sed -n "$erstrln"'{s@.*\( Guess[^ ]*\).*@\1@I}')
+                   vecaisgess=$(sed -n "$erstrln"'{s@.*\( Guess[^ ]*\).*@\1@I}' "${firstcurinfile%.gjf}_failed.gjf")
                    jaunaisgess=$(echo "$vecaisgess" | sed 's/Read//I;s/,,/,/g;s/(,/(/;s/,)/)/')
                    sed -i "$erstrln"'{s/.*/& /;s/ Geom[=(]*Check//I;s/'"$vecaisgess"'/'"$jaunaisgess"'/}' "${firstcurinfile%.gjf}_failed.gjf"
                else
@@ -1869,13 +1976,13 @@ generategjf() {
                    [ $solveacc2e -lt 3 ] && acc2esolver $1 $2
                else
                    if [ -z "$(grep -m 1 '#' $icurinfile | grep -i 'IOp(10/63=1)')" ]; then
-                       sed -i '1,/#/s/Polar[^ ]*/& IOp(10\/63=1)/I' $icurinfile # disabling FMM only for CPHF
+                       sed -i '1,'"$bobieks"'\(Polar[^ ]*\)@\1\2 IOp(10\/63=1)@I}' $icurinfile # disabling FMM only for CPHF
                    elif [ -z "$(grep -m 1 '#' $icurinfile | grep -i -e 'IOp(10/8=1)' -e 'IOp(10/8=3)' -e 'IOp(10/8=-1)')" ]; then
-                       sed -i '1,/#/s/Polar[^ ]*/& IOp(10\/8=1)/I' $icurinfile # each var in separate space
+                       sed -i '1,'"$bobieks"'\(Polar[^ ]*\)@\1\2 IOp(10\/8=1)@I}' $icurinfile # each var in separate space
                    elif [ -z "$(grep -m 1 '#' $icurinfile | grep -i -e 'IOp(10/8=3)' -e 'IOp(10/8=-1)')" ]; then
-                       sed -i '1,/#/s/IOp(10\/8=1)/IOp(10\/8=3)/I' $icurinfile # direct inversion
+                       sed -i '1,'"$bobieks"'IOp(10\/8=1)@\1IOp(10\/8=3)@I}' $icurinfile # direct inversion
                    elif [ -z "$(grep -m 1 '#' $icurinfile | grep -i 'IOp(10/8=-1)')" ]; then
-                       sed -i '1,/#/s/IOp(10\/8=3)/IOp(10\/8=-1)/I' $icurinfile # each var separately
+                       sed -i '1,'"$bobieks"'IOp(10\/8=3)@\1IOp(10\/8=-1@/I}' $icurinfile # each var separately
                    fi
                fi
            fi
@@ -1883,7 +1990,7 @@ generategjf() {
            if [ $solvefmm -gt 2 ]; then
                echo "Solving problems of FMM..."
                    if [ -z "$(grep -m 1 '#' $icurinfile | grep -i 'IOp(10/63=1)')" ]; then
-                       sed -i '1,/#/s/Polar[^ ]*/& IOp(10\/63=1)/I' $icurinfile # disabling FMM only for CPHF
+                       sed -i '1,'"$bobieks"'\(Polar[^ ]*\)@\1\2 IOp(10\/63=1)@I}' $icurinfile # disabling FMM only for CPHF
                    fi
            fi
                 
@@ -1907,30 +2014,30 @@ generategjf() {
                    [ -n "$nadsects" ] && nadsects="$nadsects;"
 
                    if [ -n "$(grep -m 1 '#' $icurinfile | grep -o '[Ss][Cc][Rr][Ff][^ ]*' | grep -i 'read')" ]; then
-                           sed -i '1,/--Link1--/I{/#/{n;n;n;n;:a;n;/^[ ]*$/!ba;'"$nadsects"'n;a \
+                           sed -i '1,/--Link1--/I{'"$bobiek"'n;n;n;n;:a;n;/^[ ]*$/!ba;'"$nadsects"'n;a \
 OFac=0.8    RMin5
 }}' $icu   rinfi
                    else
-                                sed -i '1,/--Link1--/I{/#/{n;n;n;n;:a;n;/^[ ]*$/!ba;'"$nadsects"'a \
+                                sed -i '1,/--Link1--/I{'"$bobiek"'n;n;n;n;:a;n;/^[ ]*$/!ba;'"$nadsects"'a \
 OFac=0.8    RMin5\n
 }}' $icu   rinfi
-                                sed -i '1,/--Link1--/I{/#/s/scrf[(=]*/scrf=(Read,/I}' $icurinfile
+                                sed -i '1,/--Link1--/I{'"$bobieks"'scrf[(=]*@\1scrf=(Read,@I}}' "$icurinfile"
                    fi
                    sed -i '1,/--Link1--/I{/OFac=/a \
 ! Please reposition the above line yourself if this does not work.
-}' $icurinfile
+}' "$icurinfile"
 # the solutions proposed by Dr. Joaquin Barroso https://joaquinbarroso.com/2011/10/24/polarizable-continuum-model-pcm-2/
                else
                   if [ -z "$(sed -n '1,/--Link1--/Ip' $icurinfile | grep -i 'OFac=0.8 ')" ]; then
-                      sed -i '1,/--Link1--/I{s/OFac=[^ ]*/OFac=0.8/I}' $icurinfile
+                      sed -i '1,/--Link1--/I{s/OFac=[^ ]*/OFac=0.8/I}' "$icurinfile"
                   elif [ -z "$(sed -n '1,/--Link1--/Ip' $icurinfile | grep -i 'OFac=0.75 ')" ]; then
-                      sed -i '1,/--Link1--/I{s/OFac=[^ ]*/OFac=0.75/I;/OFac=/Is/$/ ! OFac=0.8/}' $icurinfile
+                      sed -i '1,/--Link1--/I{s/OFac=[^ ]*/OFac=0.75/I;/OFac=/Is/$/ ! OFac=0.8/}' "$icurinfile"
                   fi
                   
                   if [ -z "$(sed -n '1,/--Link1--/Ip' $icurinfile | grep -i 'RMin=0.5 ')" ]; then
-                      sed -i '1,/--Link1--/I{s/RMin=[^ ]*/RMin=0.5/I}' $icurinfile
+                      sed -i '1,/--Link1--/I{s/RMin=[^ ]*/RMin=0.5/I}' "$icurinfile"
                   elif [ -z "$(sed -n '1,/--Link1--/Ip' $icurinfile | grep -i 'RMin=0.6 ')" ]; then
-                      sed -i '1,/--Link1--/I{s/RMin=[^ ]*/RMin=0.6/I;/RMin=/Is/$/ ! RMin=0.5/}' $icurinfile
+                      sed -i '1,/--Link1--/I{s/RMin=[^ ]*/RMin=0.6/I;/RMin=/Is/$/ ! RMin=0.5/}' "$icurinfile"
                   fi
                fi
            fi
@@ -1938,8 +2045,8 @@ OFac=0.8    RMin5\n
            if [ $solverwf -gt 2 ]; then
                echo "Redistributing disk space..."
                rwfsolver $1 $2
-               export curinfile=$icurinfile
-               export curoutfile=$icuroutfile
+               export curinfile="$icurinfile"
+               export curoutfile="$icuroutfile"
                export solvescf=0; export solvegeom=0
                return 1
            fi
@@ -1955,7 +2062,7 @@ OFac=0.8    RMin5\n
            # the gawk '!x[$0]++' statement works as follows: the line ($0) is added to the array as a key, then the element evaluates by default as empty string (if that key (string) was never referenced before) which is then negated by ! and thus becomes true, which by default triggers printing of $0 in gawk. Then the value for key is incremented, so when it is encountered next time negation turns it into the false and $0 is not printed. Thanks to Archemar and Isaac, https://unix.stackexchange.com/questions/159695
            # jaunsroute=$(echo "$tagadroute" | sed -n 's/,/\n/g;p' | gawk '!x[$0]++' | tr '\n' ',' | xargs)
            sed -i "$otraisbeidzas"'{s.'"$tagadroute"'.'"$jaunsroute"'.}' "$icurinfile"
-           sed -n "$otraisbeidzas"'{/^#/{n;n;n;n;n;:a;p;n;/--Link1--/!ba;:end;n;$!bend}}' "$icurinfile" > new.addinput.${mygorgeouspid}.$HOSTNAME
+           sed -n "$otraisbeidzas"'{/^#/{:rustik;n;/#/brustik;n;:gagik;n;/^ *$/!bgagik;n;:nino;n;/^ *$/!bnino;n;:a;p;n;/--Link1--/!ba;:end;n;$!bend}}' "$icurinfile" > new.addinput.${mygorgeouspid}.$HOSTNAME
            [ -n "$(sed -n '1{s/^\s*$//;p}' new.addinput.${mygorgeouspid}.$HOSTNAME)" ] && sed -i '1,/^\s*$/d' new.addinput.${mygorgeouspid}.$HOSTNAME
            echo "< removed   > added" > diff.addinput.${mygorgeouspid}.$HOSTNAME
            echo >> diff.addinput.${mygorgeouspid}.$HOSTNAME
@@ -1969,6 +2076,7 @@ OFac=0.8    RMin5\n
            if [ "$failedsteproute" == "$jaunsroute" ] || ( $absolute_disaster ); then
                if [ -z "$(cat "diff.addinput.${mygorgeouspid}.$HOSTNAME")" ] || ( $absolute_disaster ); then
                    if ($debugging); then
+                       echo "DEBUG START"
                        if ($absolute_disaster); then
                         echo "XXXPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPXXX"
                         echo -e "\nProposed solution in the route section is:\n"; echo "$jaunsroute"; echo; echo "> > > $diffroute"; echo
@@ -1977,6 +2085,7 @@ OFac=0.8    RMin5\n
                        echo "XXXPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPXXX"
                        echo -e "\nProposed solution in the additional input section was goiing to be:\n"; echo $(cat "diff.addinput.${mygorgeouspid}.$HOSTNAME"); echo
                        echo "XXXPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPXXX"
+                       echo "DEBUG END"
                    fi
                    echo "Pitifully retreating solver. Proceeding with next ones..."
                    export solvemcscf=0 solvescf=0 solvefmm=0 solvecphf=0 solvegeom=0 solveacc2=0 solverwf=0 solvescpcm_redo=0 solvescpcm=0 solvecav=0 solveimg=0
@@ -2006,9 +2115,9 @@ OFac=0.8    RMin5\n
        fi # if a solver is to be executed
     done # cycle for skipping unsuccessfully solved jobs
 
-    filesiz=$(wc -c < $icurinfile)
-    if [ $(grep -c "#" $icurinfile) -lt 1 ]; then
-        rm $icurinfile
+    filesiz=$(wc -c < "$icurinfile")
+    if [ $(grep -c "#" "$icurinfile") -lt 1 ]; then
+        rm "$icurinfile"
         return 0
     fi
 
@@ -2054,12 +2163,12 @@ OFac=0.8    RMin5\n
             # fi
         axelbant=0; { [ $solvescf -gt 2 ] || [ $solvemcscf -gt 2 ]  || [ $solvefmm -gt 2 ] || [ $solvecphf -gt 2 ] || [ $solvecav -gt 2 ] || [ $solvegeom -gt 2 ] || [ $solveacc2 -gt 2 ] || [ $solvescpcm_redo -gt 2 ] || [ $solvescpcm -gt 2 ] || [ $solverwf -gt 2 ] || [ $solveimg -gt 2 ]; } && axelbant=1
         echo "Last job removed after the failure was $((1+nrdone-axelbant)). Proceeding with the rest, copied to input file $icurinfile..."
-        ($debugging) && echo "Relaunch time (from the library): $(date)" || echo "Relaunch time: $(date)"
-        export curinfile=$icurinfile
-        export curoutfile=$icuroutfile
+        ($debugging) && echo "DEBUG: Relaunch time (from the library): $(date)" || echo "Relaunch time: $(date)"
+        export curinfile="$icurinfile"
+        export curoutfile="$icuroutfile"
         return 1;
     else
-        rm $icurinfile
+        rm "$icurinfile"
         echo "Nothing can be launched or rerun at this point, so will exit now."
         echo "Calculation end time: $(date)"
         return 0;
@@ -2109,6 +2218,20 @@ checkout() {
         [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
         echo "Out of RAM on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
         generategjf $1 $2 && return 0 || return 1
+    elif [ "$(uuuu=${2//_fbk/_1}; echo "${uuuu: -12}")" == "_1_1_1_1.out" ] && (! $neverstop ); then # this must work if there was some "Error termination" message
+        echo "====================="; echo "Errors buried this job. Stopping execution."; echo "====================="
+        ( $regclean ) && getridofdirt $firstcurinfile
+        export solvescf=0 solvefmm=0 solvecphf=0 solveacc2=0 solvegeom=0 solverwf=0 solvecav=0 solvescpcm_redo=0 solvescpcm=0 solveimg=0
+        echo "Too many consec. errors or syntax errors (case 3) on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
+        [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
+        generategjf $1 $2 && return 0 || return 1
+    elif [ "$(uuuu=${2//_fbk/_1}; echo "${uuuu: -18}" | tr '3' '1' | tr '2' '1')" == "_1_1_1_1_1_1_1.out" ] && (! $neverstop ); then # this must work if there was some "Error termination" message
+        echo "====================="; echo "Errors buried this job. Stopping execution."; echo "====================="
+        ( $regclean ) && getridofdirt $firstcurinfile
+        export solvescf=0 solvefmm=0 solvecphf=0 solveacc2=0 solvegeom=0 solverwf=0 solvecav=0 solvescpcm_redo=0 solvescpcm=0 solveimg=0
+        echo "Too many consec. errors or syntax errors (case 2) on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
+        [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
+        generategjf $1 $2 && return 0 || return 1
     elif [ -n "$(tail -n 20 $2 | grep "SC-PCM: Convergence not achieved within")" ] ; then
         echo "====================="; echo "SC-PCM did not converge in time... Trying to restart."
         echo "====================="
@@ -2148,19 +2271,19 @@ checkout() {
         ( $regclean ) && getridofdirt $firstcurinfile
         donlines=$(grep -ce "Normal term" $2); #((totlines--))
         icurinfile=${1%.gjf}_$((donlines+1)).gjf
-        cp $1 $icurinfile
+        cp $1 "$icurinfile"
         icuroutfile=${icurinfile%.gjf}.out
         echo "Restarting with name $icurinfile..."
         for kdgs in $(seq $donlines); do
             sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
         done
-        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-            sed '1 d' -i $icurinfile
+        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+            sed '1 d' -i "$icurinfile"
         done
         perl -0644 -i -pe 's/\n(.*[\S]+)\n(--Link1--)/\n$1\n\n$2/g' $icurinfile # adds newline only if missing
-        echo "" >> $icurinfile
-        export curinfile=$icurinfile
-        export curoutfile=$icuroutfile
+        echo "" >> "$icurinfile"
+        export curinfile="$icurinfile"
+        export curoutfile="$icuroutfile"
         echo "Lacking a final \n on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
         return 1
     elif [ -n "$(tac $2 | sed -n '1,/Entering Link 1/p' | grep -e "Enter MCSCF program")" ] && [ -n "$(tail -n 20 $2 | grep -e 'Convergence failure\.')" ]; then
@@ -2174,14 +2297,10 @@ checkout() {
         echo "MC-SCF diverged on $HOSTNAME for ${2%.out} at $(date), solve status $solvemcscf" >> $HOME/CalcLog.logg.$HOSTNAME
         [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
         generategjf $1 $2 && return 0 || return 1
-    elif [ -n "$(tail -n 20 $2 | grep -e "criterion not met" -e "No lower point found -- run aborted" -e 'Convergence failure\.' -e 'FmT array not big enough in TabGmT')" ]; then
-        echo "====================="; echo "SCF convergence failure. Stopping execution."; echo "====================="
+    elif [ -n "$(tail -n 20 $2 | grep -e 'Inv3 failed in PCMMkU' -e "criterion not met" -e "No lower point found -- run aborted" -e 'Convergence failure\.' -e 'FmT array not big enough in TabGmT')" ]; then
+        echo "====================="; [ -n "$(tail -n 20 $2 | grep -e 'Inv3 failed in PCMMkU')" ] && echo "SCRF convergence failure. Stopping execution." || echo "SCF convergence failure. Stopping execution."; echo "====================="
         ( $regclean ) && getridofdirt $firstcurinfile
         [ $trysolve -gt 0 ] && { solvescf=3; echo "Trying to solve the issue..."; } || solvescf=0
-        #[ "${2: -36}" == "_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1.out" ] || [ $(ofind "$2" '#' | grep '#' | grep -o '[Nn][Dd]amp' | wc -l) -gt 1 ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -lt 2 ] && { echo "Pitifully retreating solver. Proceeding with next ones..."; export solvescf=0; } # 10 solutions up to now
-        #if [ -f "${1%_1.gjf}.gjf" ]; then
-        #    [ "$(grep -m 1 '#' "$1")" == "$(grep -m 1 '#' "${1%_1.gjf}.gjf")" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -lt 2 ] && { echo "Pitifully retreating solver. Proceeding with next ones..."; export solvescf=0; }
-        #fi
         [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
         echo "SCF diverged on $HOSTNAME for ${2%.out} at $(date), solve status $solvescf" >> $HOME/CalcLog.logg.$HOSTNAME
         generategjf $1 $2 && return 0 || return 1
@@ -2190,10 +2309,6 @@ checkout() {
         ( $regclean ) && getridofdirt $firstcurinfile
         [ $trysolve -gt 0 ] && { solvescf=3; echo "Trying to solve the issue..."; } || solvescf=0
         echo "SCF diverged on $HOSTNAME for ${2%.out} at $(date), solve status $solvescf" >> $HOME/CalcLog.logg.$HOSTNAME
-        #[ "${2: -36}" == "_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1.out" ] || [ $(ofind "$2" '#' | grep '#' | grep -o '[Nn][Dd]amp' | wc -l) -gt 1 ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -lt 2 ] && { echo "Pitifully retreating solver. Proceeding with next ones..."; export solvescf=0; } # 10 solutions up to now
-        #if [ -f "${1%_1.gjf}.gjf" ]; then
-        #    [ "$(grep -m 1 '#' "$1")" == "$(grep -m 1 '#' "${1%_1.gjf}.gjf")" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -lt 2 ] && { echo "Pitifully retreating solver. Proceeding with next ones..."; export solvescf=0; }
-        #fi
         [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
         generategjf $1 $2 && return 0 || return 1
     elif [ -n "$(sed '/dumping \/fiocom/,/Error termin/d' $2 | tail -n 20 | grep -e 'o file to extend for' -e 'formation cannot fit in the' -e 'File extend in NtrEx1 failed')" ]; then
@@ -2220,7 +2335,7 @@ checkout() {
         ( $regclean ) && getridofdirt $firstcurinfile
         donlines=$(grep -ce "Normal term" $2); #((totlines--))
         icurinfile=${1%.gjf}_$((donlines+1)).gjf
-        cp $1 $icurinfile
+        cp $1 "$icurinfile"
         icuroutfile=${icurinfile%.gjf}.out
         rm "$1"
         > $1 # a comment will be added before the failed job in the original input file
@@ -2234,7 +2349,7 @@ checkout() {
         echo "! the next job failed, hence all below was not calculated" >> "$1"
         cat "$icurinfile" >> "$1" # done meddling with the original input file
         until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -eq 0 ]; do
-            sed '1 d' -i $icurinfile
+            sed '1 d' -i "$icurinfile"
         done
         echo "Restarting with name $icurinfile..."
         mauritius=$(grep -m 1 -i "%RWF=" $1)
@@ -2249,7 +2364,7 @@ checkout() {
         else
             mauritius=$(grep -m 3 -i -e "^%RWF=" -e "^%INT=" -e "^%D2E=" "$1" | sort -u | sed 's/.*=//;s/,[0-9]\+[MG][BW]/ /Ig')
             rm $mauritius
-            ($debugging) && echo "RWF, INT and/or D2E files are mentioned in the input file..."
+            ($debugging) && echo "DEBUG: RWF, INT and/or D2E files are mentioned in the input file..."
             echo "Garbage in $GAUSS_SCRDIR, $GAUSS_SPRSCRDIR and $HOME deleted for ${2%.out} on $HOSTNAME at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
         fi
         printf " ...removed\n"; echo "====================="
@@ -2268,13 +2383,13 @@ checkout() {
                 icuroutfile=${icurinfile%.gjf}.out
                 sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
                 until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -eq 0 ]; do
-                    sed '1 d' -i $icurinfile
+                    sed '1 d' -i "$icurinfile"
                 done
                 echo "Restarting with name $icurinfile..."
             fi
         fi
-        export curinfile=$icurinfile
-        export curoutfile=$icuroutfile
+        export curinfile="$icurinfile"
+        export curoutfile="$icuroutfile"
         [ -z "$icurinfile" ] || [ "$(wc -l < "$icurinfile")" -lt 5 ] && return 0 || return 1
     elif [ -n "$(sed '/dumping \/fiocom/,/Error termin/d' $2 | tail -n 30 | grep -E "on file out of range|NtrErr Called from FileIO")" ]; then
         [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
@@ -2337,50 +2452,50 @@ checkout() {
         ( $regclean ) && getridofdirt $firstcurinfile
         donlines=$(grep -ce "Normal term" $2); #((totlines--))
         icurinfile=${1%.gjf}_$((donlines+1)).gjf
-        cp $1 $icurinfile
+        cp $1 "$icurinfile"
         icuroutfile=${icurinfile%.gjf}.out
         for kdgs in $(seq $donlines); do
             sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
         done
-        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-            sed '1 d' -i $icurinfile
+        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+            sed '1 d' -i "$icurinfile"
         done
         metodika=$(grep -m 1 '^#' $icurinfile | sed 's/\/.*//;s/^.* //'); goodevar=true
         [ "${metodika:0:1}" != "U" ] || goodevar=false
         if ( $goodevar ); then
             echo "Restarting with unrestrictedness and name $icurinfile..." 
-            sed -i '/#/{s/'$metodika'/U'$metodika'/;:a;n;ba}' $icurinfile
-            export curinfile=$icurinfile
-            export curoutfile=$icuroutfile
+            sed -i "${bobieks}${metodika}"'@\1U'$metodika'@;:a;n;ba}' "$icurinfile"
+            export curinfile="$icurinfile"
+            export curoutfile="$icuroutfile"
             echo "Stable=Opt gave up on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
             return 1
         else
             echo "What to do? Already was unrestricted..."
-            sed -i '/#/{s/Stable=Opt/SP/I;:a;n;ba}' $icurinfile
-            export curinfile=$icurinfile
-            export curoutfile=$icuroutfile
+            sed -i "$bobieks"'Stable=Opt@\1SP@I;:a;n;ba}' "$icurinfile"
+            export curinfile="$icurinfile"
+            export curoutfile="$icuroutfile"
             echo "Stable=Opt gave up on $HOSTNAME for ${2%.out} at $(date), cannot solve yet =(" >> $HOME/CalcLog.logg.$HOSTNAME
             return 1
         fi
-        echo "" >> $icurinfile
+        echo "" >> "$icurinfile"
     elif [ -n "$(tail -n 20 $2 | grep "no radius for atom ")" ]; then
         echo "====================="; echo "Cannot do such heavy atoms for ESP charge fitting. Stopping execution."; echo "====================="
         ( $regclean ) && getridofdirt $firstcurinfile
         donlines=$(grep -ce "Normal term" $2); #((totlines--))
         icurinfile=${1%.gjf}_$((donlines+1)).gjf
-        cp $1 $icurinfile
+        cp $1 "$icurinfile"
         icuroutfile=${icurinfile%.gjf}.out
         echo "Restarting with NBO and name $icurinfile..."
         for kdgs in $(seq $donlines); do
             sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
         done
-        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-            sed '1 d' -i $icurinfile
+        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+            sed '1 d' -i "$icurinfile"
         done
-        sed -i '/#/{s/MK/NPA/I;s/Dipole,AtomDipole/Minimal/I;:a;n;ba};s/,,/,/g;s/(,/(/g' $icurinfile # /#/{/SaveNBOs/s/Minimal,NBO//;:a;n;ba}
-        echo "" >> $icurinfile
-        export curinfile=$icurinfile
-        export curoutfile=$icuroutfile
+        sed -i "$bobieks"'MK@\1NPA@I;s/Dipole,AtomDipole/Minimal/I;:a;n;ba};s/,,/,/g;s/(,/(/g' $icurinfile # /#/{'"$bobchesh"'/SaveNBOs/s/Minimal,NBO//;:a;n;ba}
+        echo "" >> "$icurinfile"
+        export curinfile="$icurinfile"
+        export curoutfile="$icuroutfile"
         echo "An atom too heavy for ESP on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
         return 1
     elif [ -n "$(tail -n 20 $2 | grep "Inaccurate quadrature in CalDSu")" ]; then
@@ -2445,41 +2560,41 @@ checkout() {
         totlines=$(grep -ce "#" $1); #((totlines--))
         donelines=$(grep -ce "Normal term" $2)
         icurinfile=${1%.gjf}_$((donelines+2)).gjf
-        cp $1 $icurinfile
+        cp $1 "$icurinfile"
         icuroutfile=${icurinfile%.gjf}.out
         echo "Restarting with name $icurinfile..."
         for kdgs in $(seq $((donelines+1))); do
             sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
         done
-        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-            sed '1 d' -i $icurinfile
+        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+            sed '1 d' -i "$icurinfile"
         done
-        export curinfile=$icurinfile
-        export curoutfile=$icuroutfile
-        [ $(wc -l < $icurinfile) -lt 2 ] && return 0 || return 1
+        export curinfile="$icurinfile"
+        export curoutfile="$icuroutfile"
+        [ $(wc -l < "$icurinfile") -lt 2 ] && return 0 || return 1
     elif [ -n "$(tail -n 20 $2 | grep -e "No data on chk file" -e 'ile not found')" ]; then
         echo "====================="; echo "Cannot find CHK file with guess to be used. Restarting with the default Harris guess (Your fault if this is not what You intended)..."; echo "====================="
         ( $regclean ) && getridofdirt $firstcurinfile
         donlines=$(grep -ce "Normal term" $2); #((totlines--))
         icurinfile=${1%.gjf}_$((donlines+1)).gjf
-        cp $1 $icurinfile
+        cp $1 "$icurinfile"
         icuroutfile=${icurinfile%.gjf}.out
         echo "Restarting with the default guess and the name $icurinfile..."
         for kdgs in $(seq $donlines); do
             sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
         done
-        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-            sed '1 d' -i $icurinfile
+        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+            sed '1 d' -i "$icurinfile"
         done
-        sed -i '1,/#/s/ Guess[=(]*Read[,]*\([^) ]*\)[)]*/ Guess=(\1)/;s/ Guess=()//' $icurinfile
+        sed -i '1,'"$bobieks"' Guess[=(]*Read[,]*\([^) ]*\)[)]*@\1 Guess=(\2)@;s/ Guess=()//}' "$icurinfile"
         echo "Probably stray Guess=Read left on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
-        export curinfile=$icurinfile
-        export curoutfile=$icuroutfile
+        export curinfile="$icurinfile"
+        export curoutfile="$icuroutfile"
         return 1
     elif [ -n "$(sed '/dumping \/fiocom/,/Error termin/d' $2 | tail -n 20 | grep -e 'FileIO operation on non-existent file.')" ]; then
-        echo "====================="; echo "Cannot find CHK file with guess to be used. Was it deleted? Stopping execution."; echo "====================="
+        echo "====================="; echo "Cannot find CHK file with guess to be used, or another file. Was it deleted? Or is this a disk space/code writing problem? Stopping execution."; echo "====================="
         ( $regclean ) && getridofdirt $firstcurinfile
-        echo "CHK disappeared on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
+        echo "File (CHK?) disappeared on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
         [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
         generategjf $1 $2 && return 0 || return 1
     elif [ -n "$(tail -n 20 $2 | grep -e "Large arrays:")" ]; then
@@ -2509,17 +2624,17 @@ checkout() {
         if [ $guglielmi -gt $(wc -l < $1) ]; then
             donlines=$(grep -ce "Normal term" $2); #((totlines--))
             icurinfile=${1%.gjf}_$((donlines+1)).gjf
-            cp $1 $icurinfile
+            cp $1 "$icurinfile"
             icuroutfile=${icurinfile%.gjf}.out
             echo "Restarting with name $icurinfile..."
             for kdgs in $(seq $donlines); do
                 sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
             done
-            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-                sed '1 d' -i $icurinfile
+            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+                sed '1 d' -i "$icurinfile"
             done
-            export curinfile=$icurinfile
-            export curoutfile=$icuroutfile
+            export curinfile="$icurinfile"
+            export curoutfile="$icuroutfile"
             return 1
         else
             generategjf $1 $2 && return 0 || return 1
@@ -2568,19 +2683,19 @@ checkout() {
             ( $regclean ) && getridofdirt $firstcurinfile
             donlines=$(grep -ce "Normal term" $2); #((totlines--))
             icurinfile=${1%.gjf}_$((donlines+1)).gjf
-            cp $1 $icurinfile
+            cp $1 "$icurinfile"
             icuroutfile=${icurinfile%.gjf}.out
             echo "Restarting with the explicit geometry and the name $icurinfile..."
             for kdgs in $(seq $donlines); do
                 sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
             done
-            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-                sed '1 d' -i $icurinfile
+            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+                sed '1 d' -i "$icurinfile"
             done
-            sed -i '1,/#/{s/ Guess[=(]\+\([^ )]*\)Read\([^ )]*\)[)]*/ Guess=(\1\2)/;s/(,/(/g;s/,)/)/g;s/,,/,/g;s/ Guess=()//' $icurinfile
+            sed -i '1,'"$bobieks"' Guess[=(]\+\([^ )]*\)Read\([^ )]*\)[)]*@\1 Guess=(\2\3)@;s/(,/(/g;s/,)/)/g;s/,,/,/g;s/ Guess=()//' "$icurinfile"
             echo "Probably stray Guess=Read left on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
-            export curinfile=$icurinfile
-            export curoutfile=$icuroutfile
+            export curinfile="$icurinfile"
+            export curoutfile="$icuroutfile"
             return 1
     elif [ -n "$(tail -n 20 $2 | grep "Atom specifications unexpectedly found in input stream")" ]; then
         echo "kkk: $1"
@@ -2590,19 +2705,19 @@ checkout() {
             ( $regclean ) && getridofdirt $firstcurinfile
             donlines=$(grep -ce "Normal term" $2); #((totlines--))
             icurinfile=${1%.gjf}_$((donlines+1)).gjf
-            cp $1 $icurinfile
+            cp $1 "$icurinfile"
             icuroutfile=${icurinfile%.gjf}.out
             echo "Restarting with the explicit geometry and the name $icurinfile..."
             for kdgs in $(seq $donlines); do
                 sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
             done
-            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-                sed '1 d' -i $icurinfile
+            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+                sed '1 d' -i "$icurinfile"
             done
-            sed -i '1,/#/s/ Geom[=(]*Check[)]*//' $icurinfile
+            sed -i '1,'"$bobieks"' Geom[=(]*Check[)]*@\1@}' "$icurinfile"
             echo "Probably stray Geom=Check left on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
-            export curinfile=$icurinfile
-            export curoutfile=$icuroutfile
+            export curinfile="$icurinfile"
+            export curoutfile="$icuroutfile"
             return 1
         else
             echo "====================="; echo "--Link1-- was missing. Solving..."; echo "====================="
@@ -2610,18 +2725,18 @@ checkout() {
             echo "Input file not perfect (no Link1 when needed) on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
             donlines=$(grep -ce "Normal term" $2); #((totlines--))
             icurinfile=${1%.gjf}_$((donlines+1)).gjf
-            cp $1 $icurinfile
+            cp $1 "$icurinfile"
             icuroutfile=${icurinfile%.gjf}.out
             echo "Restarting with name $icurinfile..."
             for kdgs in $(seq $donlines); do
                 sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
             done
-            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-                sed '1 d' -i $icurinfile
+            until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+                sed '1 d' -i "$icurinfile"
             done
-            sed -i '5,/#/s/%Mem=/\\'$'\n--Link1--\\'$'\n\\'$'\n%Mem=/I' $icurinfile
-            export curinfile=$icurinfile
-            export curoutfile=$icuroutfile
+            sed -i '5,'"$bobieks"'%Mem=@\1\\'$'\n--Link1--\\'$'\n\\'$'\n%Mem=@I}' "$icurinfile"
+            export curinfile="$icurinfile"
+            export curoutfile="$icuroutfile"
             return 1
         fi
     elif [ -n "$(tail -n 20 $2 | grep "no atoms in this input stru")" ]; then
@@ -2629,19 +2744,19 @@ checkout() {
         ( $regclean ) && getridofdirt $firstcurinfile
         donlines=$(grep -ce "Normal term" $2); #((totlines--))
         icurinfile=${1%.gjf}_$((donlines+1)).gjf
-        cp $1 $icurinfile
+        cp $1 "$icurinfile"
         icuroutfile=${icurinfile%.gjf}.out
         echo "Restarting with the Geom=Check and the name $icurinfile..."
         for kdgs in $(seq $donlines); do
             sed '1,/--Link1--/Id' -i $icurinfile # deletes everything until first "--Link1--", including that line
         done
-        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < $icurinfile) -lt 2 ]; do
-            sed '1 d' -i $icurinfile
+        until [ -n "$(head -n 1 $icurinfile | grep %)" ] || [ $(wc -l < "$icurinfile") -lt 2 ]; do
+            sed '1 d' -i "$icurinfile"
         done
-        sed -i '1,/#/s/#[^!]*/& Geom=Check/' $icurinfile
+        sed -i '1,'"$bobieks"'@\1 Geom=Check@}' "$icurinfile"
         echo "Probably missing Geom=Check (no atoms found) on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
-        export curinfile=$icurinfile
-        export curoutfile=$icuroutfile
+        export curinfile="$icurinfile"
+        export curoutfile="$icuroutfile"
         return 1
     elif [ -f "${1%_1.gjf}.gjf" ] && [ -z "$(tail -n 5 $2 | grep "Normal termination")" ] && [ -z "$(tail -n 5 $2 | grep "Error termination")" ]; then
         # I cancelled the check because this should be better handled by generategjf
@@ -2653,18 +2768,20 @@ checkout() {
             [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
             generategjf $1 $2 && return 0 || return 1
         #fi
-    elif [ "$(uuuu=${2//_fbk/_1}; echo "${uuuu: -34}" | tr '3' '1' | tr '2' '1')" == "_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1.out" ] && (! $neverstop ); then # this must work if there was some "Error termination" message
-        echo "====================="; echo "Errors buried this job. Stopping execution."; echo "====================="
-        ( $regclean ) && getridofdirt $firstcurinfile
-        export solvescf=0 solvefmm=0 solvecphf=0 solveacc2=0 solvegeom=0 solverwf=0 solvecav=0 solvescpcm_redo=0 solvescpcm=0 solveimg=0
-        echo "Too many consec. errors or syntax errors (case 2) on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
-        [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
-        generategjf $1 $2 && return 0 || return 1
     elif [ -n "$(tail -n 20 $2 | grep -e "Atoms in [0-9] layers were given but there should be [0-9]")" ]; then
         echo "====================="; echo "ONIOM was not defined properly! Please see output file!"; echo "====================="
         export solvescf=0 solvefmm=0 solvecphf=0 solveacc2=0 solvegeom=0 solverwf=0 solvecav=0 solvescpcm_redo=0 solvescpcm=0 solveimg=0
         ( $regclean ) && getridofdirt $firstcurinfile
         echo "ONIOM causing tears (at sprouting) on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
+        generategjf $1 $2 && return 0 || return 1
+    elif [ -z "$(tail -n 5 $2 | grep "Normal termination")" ] && [ -z "$(tail -n 5 $2 | grep "Error termination")" ] && [ $(timecompare "$(w | grep $USER | gawk '{print $4}')" "$(date | gawk '{print $4}' | cut -d : -f 1-2)") -lt 15 ]; then
+        echo "====================="; echo "You killed the job, did You not? Please see the output file if You will!"; echo "====================="
+        echo "Last 50 lines of it are:"
+        tail -50 $2; echo "====================="
+        diskspace $1    # ramsfield is implied
+        ( $regclean ) && getridofdirt $firstcurinfile
+        echo "??? on $HOSTNAME for ${2%.out} at $(date)" >> $HOME/CalcLog.logg.$HOSTNAME
+        [ -n "$(ofind "$2" '#' | tail -1 | grep -i ' Opt')" ] && [ $(tac $2 | sed -n '1,/Entering Link 1/p' | grep -c 'Step number') -gt 1 ] && solvegeom=3
         generategjf $1 $2 && return 0 || return 1
     elif [ -z "$(tail -n 5 $2 | grep "Normal termination")" ] && [ -z "$(tail -n 5 $2 | grep "Error termination")" ]; then
         echo "====================="; echo "Something weird has happened. Please see output file!"; echo "====================="
