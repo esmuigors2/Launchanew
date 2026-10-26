@@ -1,0 +1,6 @@
+[submodule "findmingeom"]
+	path = findmingeom
+	url = https://github.com/esmuigors2/findmingeom
+[submodule "findminstep"]
+	path = findminstep
+	url = https://github.com/esmuigors2/findminstep
