@@ -184,8 +184,10 @@ launchanew -crom molecule.gjf &
 | Code | Meaning |
 |------|---------|
 | 0 | Normal exit (also used for help output) |
-| 1 | Output file already exists, input file missing, or `/Gen` basis name missing |
-| 2 | Library not found or not loadable |
+| 1 | Library not found or not loadable |
+| 2 | Output file already exists |
+| 3 | Input file missing |
+| 4 | `/Gen` basis name missing from the input file (should appear as a comment for output post-processing) |
 | 5 | Gaussian executable not in `PATH`, or Gaussian environment variables not set |
 | 6 | `GAUSS_SCRDIR` not set |
 
