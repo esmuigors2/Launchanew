@@ -1,6 +1,6 @@
 # launchanew
 
-A Bash wrapper for running batches of **Gaussian** (g98 / g03 / g09 / g16) jobs. It restarts failed jobs, launches additional utilities between jobs, and tries to fix common failures automatically (SCF and geometry convergence, numeric integration, `Opt=CalcAll` issues, saddle points, SC-PCM problems, and more).
+A Bash wrapper for running batches of **<a href="https://gaussian.com/input">Gaussian</a>** (g98 / g03 / g09 / g16) jobs. It restarts failed jobs, launches additional utilities between jobs, and tries to fix common failures automatically (SCF and geometry convergence, numeric integration, `Opt=CalcAll` issues, saddle points, SC-PCM problems, and more).
 
 Current version: **0.9.0.5.1**
 
