@@ -1,6 +1,6 @@
 # launchanew
 
-A Bash wrapper for running batches of **<a href="https://gaussian.com/input">Gaussian</a>** (g98 / g03 / g09 / g16) jobs. It restarts failed jobs, launches additional utilities between jobs, and tries to fix common failures automatically (SCF and geometry convergence, numeric integration, `Opt=CalcAll` issues, saddle points, SC-PCM problems, and more).
+A `bash` wrapper for running batches of **<a href="https://gaussian.com/input">Gaussian</a>** (g98 / g03 / g09 / g16) jobs. It restarts failed jobs, launches additional utilities between jobs, and tries to fix common failures automatically (SCF and geometry convergence, numeric integration, `Opt=CalcAll` issues, saddle points, SC-PCM problems, and more).
 
 Current version: **0.9.0.5.1**
 
@@ -22,14 +22,14 @@ Options can be combined in bulk, e.g. `launchanew -crom input.file`.
 
 Also available via `launchanew -q`.
 
-1. `perl`, `sed`, `awk` (and `gawk`); plus `python` if you want to use the problem solver. It was used since the computational cluster had fairly old versions of these tools.
+1. `perl`, `sed`, `awk` (mostly `gawk`); plus `python` if you want to use the problem solver. All the code is in use since the computational cluster had fairly old versions of these tools, hence the backward compatibility should be significant. Currently it is known to work on CentOS 8.
 2. A working Gaussian installation with these environment variables set:
    - `GAUSS_EXEDIR`: must point to a `g98`, `g03`, `g09` or `g16` directory, which must also be in `PATH`
    - `GAUSS_SCRDIR`: main scratch directory (required)
    - `GAUSS_SPRSCRDIR`, `GAUSS_SPRSCRDIR2`: additional scratch directories (optional)
    - `GAUSS_LNCHDIR`: directory usually containing input, output and checkpoint files (optional fallback; defaults to the current directory)
-3. The companion library `~/bin/liblaunchanew.2026.10.26`. The script exits if it cannot be loaded.
-4. External helper scripts on your `$PATH`: `doloiduraka`, `linda2gjf`, `monitram`, `proc2gjf`, `rwf2gjf`, `sarakstu1`, `sos_save`. The library also uses `anfreqevery`, `findminstep`, `findmingeom`, `sarakstu2` and `shift_coords.py`.
+3. The companion library `~/bin/liblaunchanew.2026.10.26`, all in this same repository. The script exits if it cannot be loaded.
+4. External helper scripts on your `$PATH`: `doloiduraka`, `linda2gjf`, `monitram`, `proc2gjf`, `rwf2gjf`, `sarakstu1`, `sos_save`. The library also uses `anfreqevery`, `findminstep`, `findmingeom`, and `sarakstu2`. All are in this same repository.
 5. The shebang is `#!/home/igors/bin/bashx` which is just bash but makes the shell to read the script as a whole. This is handy for updates without interrupting the calculations already running.
 
 Add to your `~/.bashrc` or `~/.bash_profile`:
